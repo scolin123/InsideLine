@@ -381,8 +381,8 @@ def main() -> None:
     #   RUN_NBA=false RUN_MLB=false python main.py  ← dry run / off-season
     #
     RUN_NBA: bool = os.environ.get("RUN_NBA", "True").lower() == "true"
-    #RUN_MLB: bool = os.environ.get("RUN_MLB", "True").lower() == "true"
-    RUN_MLB: bool = False
+    RUN_MLB: bool = os.environ.get("RUN_MLB", "True").lower() == "true"
+
 
     # ── Phase 1: Supabase — initialised once, shared by both pipelines ────────
     # init_supabase() reads SUPABASE_URL / SUPABASE_KEY from .env.
