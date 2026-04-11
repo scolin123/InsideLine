@@ -78,6 +78,11 @@ GRADE_C_MAX_WIN_PROB: float   = 0.35
 # [Guard 7] Moneyline safety valve threshold
 ML_FAVORITE_SAFETY_THRESHOLD: float = 0.85
 
+# Win-probability blend: model weight / CDF weight
+MARKET_BLEND_FACTOR: float = 0.60   # model win_prob weight in blend
+# Kelly blend: model win_prob weight / normalised-edge-derived prob weight
+EDGE_SHRINK_MODEL:   float = 0.15   # model win_prob weight in Kelly sizing
+
 # MLB run line is always fixed at 1.5
 MLB_RUN_LINE: float           = 1.5
 
@@ -132,19 +137,23 @@ class ValueScanner:
 
     def __init__(
         self,
-        sigma:           float = MLB_LEAGUE_SIGMA,
-        garbage_thr:     float = GARBAGE_SPREAD_THR,
-        garbage_pct:     float = GARBAGE_ADJUST_PCT,
-        edge_total_min:  float = EDGE_TOTAL_MIN,
-        edge_spread_min: float = EDGE_SPREAD_MIN,
-        kelly_fraction:  float = KELLY_FRACTION,
+        sigma:               float = MLB_LEAGUE_SIGMA,
+        garbage_thr:         float = GARBAGE_SPREAD_THR,
+        garbage_pct:         float = GARBAGE_ADJUST_PCT,
+        edge_total_min:      float = EDGE_TOTAL_MIN,
+        edge_spread_min:     float = EDGE_SPREAD_MIN,
+        kelly_fraction:      float = KELLY_FRACTION,
+        market_blend_factor: float = MARKET_BLEND_FACTOR,
+        edge_shrink_model:   float = EDGE_SHRINK_MODEL,
     ) -> None:
-        self.sigma            = sigma
-        self.garbage_thr      = garbage_thr
-        self.garbage_pct      = garbage_pct
-        self.edge_total_min   = edge_total_min
-        self.edge_spread_min  = edge_spread_min
-        self.kelly_fraction   = kelly_fraction
+        self.sigma               = sigma
+        self.garbage_thr         = garbage_thr
+        self.garbage_pct         = garbage_pct
+        self.edge_total_min      = edge_total_min
+        self.edge_spread_min     = edge_spread_min
+        self.kelly_fraction      = kelly_fraction
+        self.market_blend_factor = market_blend_factor
+        self.edge_shrink_model   = edge_shrink_model
 
     # ── Main entry point ──────────────────────────────────────────────────────
     def scan(
@@ -195,7 +204,10 @@ class ValueScanner:
 
         # ── 4. Blended home win probability ──────────────────────────────────
         cdf_win_prob   = self._cdf_win_prob(proj_spread)
-        blend_win_prob = round(0.60 * home_win_prob + 0.40 * cdf_win_prob, 4)
+        blend_win_prob = round(
+            self.market_blend_factor * home_win_prob
+            + (1.0 - self.market_blend_factor) * cdf_win_prob, 4
+        )
 
         fair_ml_home = self._prob_to_american_ml(blend_win_prob)
         fair_ml_away = self._prob_to_american_ml(1.0 - blend_win_prob)
@@ -511,8 +523,8 @@ class ValueScanner:
         if raw_edge is not None:
             norm_edge   = self._normalise_edge(abs(raw_edge))
             effective_p = float(norm.cdf(norm_edge / self.sigma))
-            # 15 % model win_prob / 85 % normalised-edge-derived prob
-            p = 0.15 * win_prob + 0.85 * effective_p
+            # model win_prob / normalised-edge-derived prob blend
+            p = self.edge_shrink_model * win_prob + (1.0 - self.edge_shrink_model) * effective_p
         else:
             p = win_prob
 
