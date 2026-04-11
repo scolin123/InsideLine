@@ -28,6 +28,7 @@ import math
 import time
 import logging
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -95,11 +96,15 @@ class MLBDataLoader:
 
     def __init__(
         self,
-        seasons: list[str] = SEASONS,
-        sleep:   float     = API_SLEEP,
+        seasons:       list[str] = SEASONS,
+        sleep:         float     = API_SLEEP,
+        force_refresh: bool      = False,
+        cache_dir:     str       = "data/mlb_cache",
     ) -> None:
-        self.seasons = seasons
-        self.sleep   = sleep
+        self.seasons       = seasons
+        self.sleep         = sleep
+        self.force_refresh = force_refresh
+        self.cache_dir     = Path(cache_dir)
         self._raw: Optional[pd.DataFrame] = None
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -151,6 +156,45 @@ class MLBDataLoader:
             raise RuntimeError("Call .load() first.")
         return self._raw
 
+    # ── Private: caching helpers ──────────────────────────────────────────────
+
+    def _cache_path(self, season: str) -> Path:
+        return self.cache_dir / f"{season}.parquet"
+
+    @staticmethod
+    def _is_season_complete(season: str) -> bool:
+        """True when the season year is strictly before the current calendar year."""
+        return int(season) < datetime.utcnow().year
+
+    def _load_from_cache(self, season: str) -> Optional[pd.DataFrame]:
+        path = self._cache_path(season)
+        if not path.exists():
+            return None
+        try:
+            df = pd.read_parquet(path)
+            df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"])
+            return df
+        except Exception as exc:
+            log.warning(f"  Season {season}: cache read failed ({exc}) — falling back to API.")
+            return None
+
+    def _save_to_cache(self, season: str, df: pd.DataFrame) -> None:
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(self._cache_path(season), index=False)
+            log.info(f"  Season {season}: cached to {self._cache_path(season)}")
+        except Exception as exc:
+            log.warning(f"  Season {season}: cache write failed ({exc}) — continuing without cache.")
+
+    @staticmethod
+    def _month_ranges(season: str) -> list[tuple[str, str]]:
+        """Return (start, end) date strings for March–October of `season`."""
+        months = [
+            ("03", "31"), ("04", "30"), ("05", "31"), ("06", "30"),
+            ("07", "31"), ("08", "31"), ("09", "30"), ("10", "31"),
+        ]
+        return [(f"{season}-{m}-01", f"{season}-{m}-{d}") for m, d in months]
+
     # ── Private: data fetching ────────────────────────────────────────────────
 
     def _fetch_season(self, season: str) -> Optional[pd.DataFrame]:
@@ -158,6 +202,11 @@ class MLBDataLoader:
         Retrieve the full regular-season schedule for `season`, then pull a
         box score for every completed game.  Retries each failed game up to
         3 times with exponential back-off.
+
+        For completed seasons (before the current year), results are cached
+        locally as parquet and loaded from disk on subsequent runs.  The
+        schedule fetch itself is broken into monthly chunks (March–October),
+        each independently retried, to avoid 8-month single-request timeouts.
 
         Parameters
         ----------
@@ -169,21 +218,41 @@ class MLBDataLoader:
         pd.DataFrame or None
             One row per team per game, or None if all attempts are exhausted.
         """
-        try:
-            schedule = statsapi.schedule(
-                start_date=f"{season}-03-01",
-                end_date=f"{season}-10-31",
-                sportId=1,
-            )
-        except Exception as exc:
-            log.error(f"Season {season}: schedule fetch failed — {exc}")
-            return None
+        # ── 1. Check cache for completed seasons ──────────────────────────
+        if self._is_season_complete(season) and not self.force_refresh:
+            cached = self._load_from_cache(season)
+            if cached is not None:
+                log.info(f"  Season {season}: loaded {len(cached):,} rows from cache.")
+                return cached
+
+        # ── 2. Fetch schedule in monthly chunks with retry ────────────────
+        all_games: list[dict] = []
+        for start, end in self._month_ranges(season):
+            for attempt in range(3):
+                try:
+                    chunk = statsapi.schedule(
+                        start_date=start,
+                        end_date=end,
+                        sportId=1,
+                    )
+                    all_games.extend(chunk)
+                    break
+                except Exception as exc:
+                    wait = self.sleep * (2 ** attempt)
+                    log.warning(
+                        f"  Schedule chunk {start}/{end} attempt {attempt + 1} failed: "
+                        f"{exc} — retry in {wait:.1f}s"
+                    )
+                    time.sleep(wait)
+            else:
+                log.error(f"  Schedule chunk {start}/{end}: all retries exhausted.")
 
         # Keep only final (completed) regular-season games
-        completed = [g for g in schedule if g.get("status") == "Final"
-                                         and g.get("game_type") == "R"]
+        completed = [g for g in all_games if g.get("status") == "Final"
+                                          and g.get("game_type") == "R"]
         log.info(f"  Season {season}: {len(completed)} completed games found.")
 
+        # ── 3. Fetch boxscores per game with retry ────────────────────────
         rows: list[dict] = []
         for game in completed:
             game_id = game["game_id"]
@@ -209,7 +278,13 @@ class MLBDataLoader:
 
         df = pd.DataFrame(rows)
         df["SEASON"] = season
-        return self._standardize_columns(df)
+        df = self._standardize_columns(df)
+
+        # ── 4. Cache result for completed seasons ─────────────────────────
+        if self._is_season_complete(season):
+            self._save_to_cache(season, df)
+
+        return df
 
     def _parse_boxscore(
         self,
