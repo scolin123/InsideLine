@@ -376,12 +376,18 @@ class PipelineArtifacts:
     cv_results: dict            = field(default_factory=dict)
 
 
-def build_pipeline_artifacts() -> PipelineArtifacts:
+def build_pipeline_artifacts(force_refresh: bool = False) -> PipelineArtifacts:
     """
     Execute the expensive, game-agnostic pipeline steps once:
       1. DataLoader   — fetch multiple seasons of MLB game logs
       2. FeatureEngine — build rolling / park-adjusted feature matrix
       3. ModelTrainer  — fit XGBoost (runs) + LightGBM (win) with TimeSeriesSplit CV
+
+    Parameters
+    ----------
+    force_refresh : bool
+        When True, bypass the local parquet cache and re-fetch all seasons
+        from the MLB Stats API.  Defaults to False (use cache when available).
     """
     t0 = time.perf_counter()
     log.info("═" * 60)
@@ -389,7 +395,7 @@ def build_pipeline_artifacts() -> PipelineArtifacts:
     log.info("═" * 60)
 
     log.info("[1/3] DataLoader: fetching MLB game logs …")
-    loader = DataLoader()
+    loader = DataLoader(force_refresh=force_refresh)
     df_raw = loader.load()
 
     log.info("[2/3] FeatureEngine: building MLB feature matrix …")
