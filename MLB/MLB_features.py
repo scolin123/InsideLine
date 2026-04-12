@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
-from .MLB_config import PARK_FACTORS  # dict[team_abv → float], centred on 1.0
+from .MLB_config import PARK_FACTORS  # dict[team_abv → float], centred on 100 (100 = neutral)
 
 log = logging.getLogger(__name__)
 
@@ -243,7 +243,7 @@ class FeatureEngine:
             if off_col not in df.columns:
                 continue
             # Scale team's own offensive output by the park factor.
-            df[f"PARK_ADJ_OFF_RTG_R{win}"] = df[off_col] * df["PARK_FACTOR"]
+            df[f"PARK_ADJ_OFF_RTG_R{win}"] = df[off_col] * (df["PARK_FACTOR"] / 100.0)
         return df
 
     # ── Private — ePPA (expected runs per PA) ────────────────────────────────
