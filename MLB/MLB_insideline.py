@@ -258,7 +258,14 @@ class OddsClient:
             try:
                 dt_utc = datetime.fromisoformat(raw_ct.replace("Z", "+00:00"))
                 dt_et  = dt_utc.astimezone(ZoneInfo("America/New_York"))
-                game.commence_time = dt_et.strftime("%-m/%-d %-I:%M%p").lower().rstrip("m") + "ET"
+                day    = dt_et.day
+                if 11 <= (day % 100) <= 13:
+                    suffix = "th"
+                else:
+                    suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+                hour   = dt_et.hour % 12 or 12
+                minute = dt_et.strftime("%M")
+                game.commence_time = f"{dt_et.strftime('%B')} {day}{suffix} @ {hour}:{minute}"
             except Exception:
                 game.commence_time = raw_ct
 
