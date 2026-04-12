@@ -762,19 +762,23 @@ class ValueScanner:
 
     def __init__(
         self,
-        sigma:           float = LEAGUE_SIGMA,
-        garbage_thr:     float = GARBAGE_SPREAD_THR,
-        garbage_pct:     float = GARBAGE_ADJUST_PCT,
-        edge_total_min:  float = EDGE_TOTAL_MIN,
-        edge_spread_min: float = EDGE_SPREAD_MIN,
-        kelly_fraction:  float = KELLY_FRACTION,
+        sigma:               float = LEAGUE_SIGMA,
+        garbage_thr:         float = GARBAGE_SPREAD_THR,
+        garbage_pct:         float = GARBAGE_ADJUST_PCT,
+        edge_total_min:      float = EDGE_TOTAL_MIN,
+        edge_spread_min:     float = EDGE_SPREAD_MIN,
+        kelly_fraction:      float = KELLY_FRACTION,
+        market_blend_factor: float = MARKET_BLEND_FACTOR,
+        edge_shrink_factor:  float = EDGE_SHRINK_FACTOR,
     ):
-        self.sigma            = sigma
-        self.garbage_thr      = garbage_thr
-        self.garbage_pct      = garbage_pct
-        self.edge_total_min   = edge_total_min
-        self.edge_spread_min  = edge_spread_min
-        self.kelly_fraction   = kelly_fraction
+        self.sigma               = sigma
+        self.garbage_thr         = garbage_thr
+        self.garbage_pct         = garbage_pct
+        self.edge_total_min      = edge_total_min
+        self.edge_spread_min     = edge_spread_min
+        self.kelly_fraction      = kelly_fraction
+        self.market_blend_factor = market_blend_factor
+        self.edge_shrink_factor  = edge_shrink_factor
 
     # ── Main entry point ──────────────────────────────────────────────────────
     def scan(
@@ -881,28 +885,28 @@ class ValueScanner:
         if market_spread is not None:
             market_implied_spread = -market_spread        # what market thinks home wins by
             eff_spread = round(
-                proj_spread * (1.0 - MARKET_BLEND_FACTOR)
-                + market_implied_spread * MARKET_BLEND_FACTOR,
+                proj_spread * (1.0 - self.market_blend_factor)
+                + market_implied_spread * self.market_blend_factor,
                 2,
             )
             log.debug(
                 "[Guard 14] Spread blending: proj=%.2f  mkt_implied=%.2f  "
                 "eff=%.2f  (blend_factor=%.2f)",
-                proj_spread, market_implied_spread, eff_spread, MARKET_BLEND_FACTOR,
+                proj_spread, market_implied_spread, eff_spread, self.market_blend_factor,
             )
         else:
             eff_spread = proj_spread    # no market data → no blending
 
         if market_total is not None:
             eff_total = round(
-                proj_total * (1.0 - MARKET_BLEND_FACTOR)
-                + market_total * MARKET_BLEND_FACTOR,
+                proj_total * (1.0 - self.market_blend_factor)
+                + market_total * self.market_blend_factor,
                 2,
             )
             log.debug(
                 "[Guard 14] Total blending: proj=%.2f  mkt=%.2f  "
                 "eff=%.2f  (blend_factor=%.2f)",
-                proj_total, market_total, eff_total, MARKET_BLEND_FACTOR,
+                proj_total, market_total, eff_total, self.market_blend_factor,
             )
         else:
             eff_total = proj_total      # no market data → no blending
@@ -1508,16 +1512,15 @@ class ValueScanner:
         """
         return float(norm.cdf(spread / self.sigma))
 
-    @staticmethod
-    def _calibrate_edge(raw_edge: float, cap: float) -> float:
+    def _calibrate_edge(self, raw_edge: float, cap: float) -> float:
         """
         [Guard 2] Two-stage shrinkage:
-          1. Multiply by EDGE_SHRINK_FACTOR to compress raw outliers.
+          1. Multiply by edge_shrink_factor to compress raw outliers.
           2. Hard-cap at `cap` (sign-preserving).
 
         Returns calibrated_edge with the same sign as raw_edge.
         """
-        shrunk = raw_edge * EDGE_SHRINK_FACTOR
+        shrunk = raw_edge * self.edge_shrink_factor
         return round(
             math.copysign(min(abs(shrunk), cap), shrunk), 4
         )
