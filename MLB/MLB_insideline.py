@@ -434,6 +434,7 @@ def run_pipeline(
     market_spread:  Optional[float]             = None,  # home run line (−1.5 / +1.5)
     market_total:   Optional[float]             = None,
     market_ml_home: Optional[int]               = None,
+    market_ml_away: Optional[int]               = None,  # accepted but unused (scanner derives away ML internally)
     bankroll:       float                       = 1000.0,
     live_odds:      bool                        = False,
     odds_api_key:   Optional[str]               = None,
