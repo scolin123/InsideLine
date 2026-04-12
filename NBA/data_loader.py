@@ -7,7 +7,8 @@ and basic derived rate statistics.
 import time
 import math
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -24,9 +25,17 @@ class DataLoader:
     Returns a unified DataFrame with both team and opponent box-score columns.
     """
 
-    def __init__(self, seasons: list[str] = SEASONS, sleep: float = API_SLEEP):
-        self.seasons = seasons
-        self.sleep   = sleep
+    def __init__(
+        self,
+        seasons:       list[str] = SEASONS,
+        sleep:         float     = API_SLEEP,
+        force_refresh: bool      = False,
+        cache_dir:     str       = "data/nba_cache",
+    ):
+        self.seasons       = seasons
+        self.sleep         = sleep
+        self.force_refresh = force_refresh
+        self.cache_dir     = Path(cache_dir)
         self._raw: Optional[pd.DataFrame] = None
 
     # ── Public ────────────────────────────────────────────────────────────────
@@ -61,9 +70,55 @@ class DataLoader:
             raise RuntimeError("Call .load() first.")
         return self._raw
 
+    # ── Private: caching helpers ──────────────────────────────────────────────
+
+    def _cache_path(self, season: str) -> Path:
+        return self.cache_dir / f"{season}.parquet"
+
+    @staticmethod
+    def _is_season_complete(season: str) -> bool:
+        """True when the season's ending year is before the current calendar year.
+
+        NBA seasons use the format ``"2023-24"``, which ends in calendar year 2024.
+        """
+        end_year = int(season.split("-")[1]) + 2000
+        return end_year < datetime.utcnow().year
+
+    def _load_from_cache(self, season: str) -> Optional[pd.DataFrame]:
+        path = self._cache_path(season)
+        if not path.exists():
+            return None
+        try:
+            df = pd.read_parquet(path)
+            df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"])
+            return df
+        except Exception as exc:
+            log.warning(f"  Season {season}: cache read failed ({exc}) — falling back to API.")
+            return None
+
+    def _save_to_cache(self, season: str, df: pd.DataFrame) -> None:
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(self._cache_path(season), index=False)
+            log.info(f"  Season {season}: cached to {self._cache_path(season)}")
+        except Exception as exc:
+            log.warning(f"  Season {season}: cache write failed ({exc}) — continuing without cache.")
+
     # ── Private ───────────────────────────────────────────────────────────────
+
     def _fetch_season(self, season: str) -> Optional[pd.DataFrame]:
-        """Fetch LeagueGameLog for one season (retries on timeout)."""
+        """Fetch LeagueGameLog for one season (retries on timeout).
+
+        For completed seasons (ending before the current calendar year), results
+        are cached locally as parquet and loaded from disk on subsequent runs.
+        """
+        # Check cache for completed seasons
+        if self._is_season_complete(season) and not self.force_refresh:
+            cached = self._load_from_cache(season)
+            if cached is not None:
+                log.info(f"  Season {season}: loaded {len(cached):,} rows from cache.")
+                return cached
+
         for attempt in range(3):
             try:
                 endpoint = leaguegamelog.LeagueGameLog(
@@ -74,7 +129,13 @@ class DataLoader:
                 time.sleep(self.sleep)
                 df = endpoint.get_data_frames()[0]
                 df["SEASON"] = season
-                return self._standardize_columns(df)
+                df = self._standardize_columns(df)
+
+                # Cache result for completed seasons
+                if self._is_season_complete(season):
+                    self._save_to_cache(season, df)
+
+                return df
             except Exception as exc:
                 wait = self.sleep * (2 ** attempt)
                 log.warning(f"Season {season} attempt {attempt+1} failed: {exc} — retry in {wait:.1f}s")
