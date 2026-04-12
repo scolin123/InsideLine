@@ -250,7 +250,7 @@ def _print_unified_summary(
     COL_GRADE   =  7
     COL_SPORT   =  5
     COL_MATCHUP = 14
-    COL_TIME    = 13
+    COL_TIME    = 20
     COL_TYPE    = 10
     COL_SIDE    =  6
     COL_BOOK    =  8
