@@ -27,6 +27,8 @@ Key design decisions
 import math
 import time
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -45,6 +47,7 @@ from .MLB_config import (
     SP_RECENT_STARTS_LONG,
     BULLPEN_FATIGUE_DAYS,
     STATSAPI_TEAM_ABV_MAP,
+    STATSAPI_TEAM_ID_MAP,
 )
 
 log = logging.getLogger(__name__)
@@ -100,11 +103,13 @@ class MLBDataLoader:
         sleep:         float     = API_SLEEP,
         force_refresh: bool      = False,
         cache_dir:     str       = "data/mlb_cache",
+        max_workers:   int       = 8,
     ) -> None:
         self.seasons       = seasons
         self.sleep         = sleep
         self.force_refresh = force_refresh
         self.cache_dir     = Path(cache_dir)
+        self.max_workers   = max_workers
         self._raw: Optional[pd.DataFrame] = None
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -173,6 +178,34 @@ class MLBDataLoader:
         try:
             df = pd.read_parquet(path)
             df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"])
+            # Backfill TEAM_ABV from TEAM_ID if the column is missing or all empty.
+            if "TEAM_ABV" not in df.columns or df["TEAM_ABV"].eq("").all():
+                df["TEAM_ABV"] = df["TEAM_ID"].map(STATSAPI_TEAM_ID_MAP).fillna("")
+                log.info(f"  Season {season}: backfilled TEAM_ABV from TEAM_ID.")
+
+            # Backfill derived columns that were missing from older caches.
+            if "TEAM_ERA" in df.columns:
+                df["TEAM_ERA"] = pd.to_numeric(df["TEAM_ERA"], errors="coerce").fillna(4.50)
+            if "RA" not in df.columns and "TEAM_RUNS_ALLOWED" in df.columns:
+                df["RA"] = df["TEAM_RUNS_ALLOWED"]
+            if "BABIP" not in df.columns:
+                babip_den = (df["AB"] - df["SO"] - df["HR"] + df["SF"]).clip(lower=1)
+                df["BABIP"] = ((df["H"] - df["HR"]) / babip_den).round(3)
+            ip_safe = df.get("TEAM_IP", pd.Series(9.0, index=df.index))
+            ip_safe = pd.to_numeric(ip_safe, errors="coerce").fillna(9.0).clip(lower=0.1)
+            if "P_ERA" not in df.columns and "TEAM_ERA" in df.columns:
+                df["P_ERA"] = df["TEAM_ERA"]
+            if "P_WHIP" not in df.columns and "TEAM_H_ALLOWED" in df.columns:
+                df["P_WHIP"] = ((df["TEAM_H_ALLOWED"] + df["TEAM_BB_ALLOWED"]) / ip_safe).round(3)
+            if "P_K9" not in df.columns and "TEAM_K" in df.columns:
+                df["P_K9"]  = (df["TEAM_K"]          * 9 / ip_safe).round(2)
+                df["P_BB9"] = (df["TEAM_BB_ALLOWED"] * 9 / ip_safe).round(2)
+                df["P_HR9"] = (df["TEAM_HR_ALLOWED"] * 9 / ip_safe).round(2)
+                df["P_FIP"] = (
+                    (13 * df["TEAM_HR_ALLOWED"] + 3 * df["TEAM_BB_ALLOWED"] - 2 * df["TEAM_K"])
+                    / ip_safe + FIP_CONSTANT
+                ).round(2)
+                log.info(f"  Season {season}: backfilled pitching rate columns (P_ERA/WHIP/K9/…).")
             return df
         except Exception as exc:
             log.warning(f"  Season {season}: cache read failed ({exc}) — falling back to API.")
@@ -252,17 +285,24 @@ class MLBDataLoader:
                                           and g.get("game_type") == "R"]
         log.info(f"  Season {season}: {len(completed)} completed games found.")
 
-        # ── 3. Fetch boxscores per game with retry ────────────────────────
+        # ── 3. Fetch boxscores in parallel with per-worker retry ──────────
         rows: list[dict] = []
-        for game in completed:
+        rows_lock = threading.Lock()
+        total = len(completed)
+        done_count = [0]   # mutable counter shared across threads
+
+        def fetch_one(game: dict) -> None:
             game_id = game["game_id"]
             for attempt in range(3):
                 try:
-                    box = statsapi.boxscore_data(game_id)
-                    time.sleep(self.sleep)
+                    box    = statsapi.boxscore_data(game_id)
                     parsed = self._parse_boxscore(box, game_id, season)
-                    rows.extend(parsed)
-                    break
+                    with rows_lock:
+                        rows.extend(parsed)
+                        done_count[0] += 1
+                        if done_count[0] % 100 == 0:
+                            log.info(f"  Season {season}: {done_count[0]}/{total} games fetched …")
+                    return
                 except Exception as exc:
                     wait = self.sleep * (2 ** attempt)
                     log.warning(
@@ -270,8 +310,12 @@ class MLBDataLoader:
                         f"{exc} — retry in {wait:.1f}s"
                     )
                     time.sleep(wait)
-            else:
-                log.error(f"  Game {game_id}: all attempts exhausted.")
+            log.error(f"  Game {game_id}: all attempts exhausted.")
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+            futures = [pool.submit(fetch_one, g) for g in completed]
+            for f in as_completed(futures):
+                f.result()   # re-raise any unexpected exception
 
         if not rows:
             return None
@@ -310,8 +354,10 @@ class MLBDataLoader:
             team_info    = team_data.get("team", {})
             team_name    = team_info.get("name", "")
             team_id      = team_info.get("id", -1)
-            team_abv     = STATSAPI_TEAM_ABV_MAP.get(
-                team_info.get("teamName", ""), team_name[:3].upper()
+            # Use numeric ID map first (most reliable); fall back to name lookup.
+            team_abv     = STATSAPI_TEAM_ID_MAP.get(
+                team_id,
+                STATSAPI_TEAM_ABV_MAP.get(team_info.get("teamName", ""), ""),
             )
             batting      = team_data.get("teamStats", {}).get("batting",  {})
             pitching     = team_data.get("teamStats", {}).get("pitching", {})
@@ -405,7 +451,11 @@ class MLBDataLoader:
         # Safe denominators
         pa_safe = df["PA"].clip(lower=1)
         ab_safe = df["AB"].clip(lower=1)
+        ip_safe = pd.to_numeric(df.get("TEAM_IP", 9.0), errors="coerce").fillna(9.0).clip(lower=0.1)
         df["PA_CLIPPED"] = pa_safe
+
+        # ── TEAM_ERA: cast to float ───────────────────────────────────────
+        df["TEAM_ERA"] = pd.to_numeric(df["TEAM_ERA"], errors="coerce").fillna(4.50)
 
         # ── wOBA ──────────────────────────────────────────────────────────
         w = WOBA_WEIGHTS
@@ -433,6 +483,24 @@ class MLBDataLoader:
         # ── Rate stats ────────────────────────────────────────────────────
         df["K_PCT"]  = (df["SO"] / pa_safe).round(4)
         df["BB_PCT"] = (df["BB"] / pa_safe).round(4)
+
+        # ── BABIP ─────────────────────────────────────────────────────────
+        babip_den = (df["AB"] - df["SO"] - df["HR"] + df["SF"]).clip(lower=1)
+        df["BABIP"] = ((df["H"] - df["HR"]) / babip_den).round(3)
+
+        # ── RA (Runs Allowed) ─────────────────────────────────────────────
+        df["RA"] = df["TEAM_RUNS_ALLOWED"]
+
+        # ── Team pitching rate stats ──────────────────────────────────────
+        df["P_ERA"]  = df["TEAM_ERA"]   # already cast to float above
+        df["P_WHIP"] = ((df["TEAM_H_ALLOWED"] + df["TEAM_BB_ALLOWED"]) / ip_safe).round(3)
+        df["P_K9"]   = (df["TEAM_K"]          * 9 / ip_safe).round(2)
+        df["P_BB9"]  = (df["TEAM_BB_ALLOWED"] * 9 / ip_safe).round(2)
+        df["P_HR9"]  = (df["TEAM_HR_ALLOWED"] * 9 / ip_safe).round(2)
+        df["P_FIP"]  = (
+            (13 * df["TEAM_HR_ALLOWED"] + 3 * df["TEAM_BB_ALLOWED"] - 2 * df["TEAM_K"])
+            / ip_safe + FIP_CONSTANT
+        ).round(2)
 
         # Placeholder; filled correctly after _attach_opponent_stats
         df["WIN"] = 0
@@ -571,8 +639,8 @@ class MLBDataLoader:
         log.info("Computing SP rest days and bullpen fatigue …")
 
         df = df.sort_values(["TEAM_ID", "GAME_DATE"]).copy()
-        df["SP_DAYS_REST"]       = 5    # default: assume fresh arm
-        df["BULLPEN_PITCHES_3D"] = 0
+        df["DAYS_REST"]       = 5    # default: assume fresh arm
+        df["BP_PITCHES_3D"]   = 0
 
         for team_id, grp in df.groupby("TEAM_ID"):
             grp    = grp.sort_values("GAME_DATE").reset_index()
@@ -587,7 +655,7 @@ class MLBDataLoader:
 
                 if sp_id in sp_last_seen:
                     delta = (game_date - sp_last_seen[sp_id]).days
-                    df.at[orig_ix[i], "SP_DAYS_REST"] = min(delta, 30)
+                    df.at[orig_ix[i], "DAYS_REST"] = min(delta, 30)
                 # else: default 5 already set
 
                 sp_last_seen[sp_id] = game_date
@@ -602,7 +670,7 @@ class MLBDataLoader:
                     (grp["GAME_DATE"] <  game_date)
                 ]
                 total_relief_pitches = recent["RELIEF_PITCHES"].sum()
-                df.at[orig_ix[i], "BULLPEN_PITCHES_3D"] = int(total_relief_pitches)
+                df.at[orig_ix[i], "BP_PITCHES_3D"] = int(total_relief_pitches)
 
         return df
 
@@ -658,11 +726,16 @@ class MLBDataLoader:
             sp_name = (
                 player_info.get("person", {}).get("fullName", "Unknown")
             )
+            # pitchHand may be directly on the player dict or nested under person
+            pitch_hand_info = (
+                player_info.get("pitchHand")
+                or player_info.get("person", {}).get("pitchHand")
+                or {}
+            )
             pitch_hand_code = (
-                player_info
-                .get("person", {})
-                .get("pitchHand", {})
-                .get("code", "")
+                pitch_hand_info.get("code", "")
+                if isinstance(pitch_hand_info, dict)
+                else str(pitch_hand_info)
             )
             if pitch_hand_code == "L":
                 sp_hand = "LHP"
