@@ -286,7 +286,16 @@ class FeatureEngine:
             )
             df["SP_HAND"] = 1
         else:
-            df["SP_HAND"] = df["SP_HAND"].fillna(1).astype(int)
+            # Data loader stores strings "LHP", "RHP", "UNK" — map to 0/1 before
+            # casting.  "UNK" and any other unexpected value defaults to 1 (RHP,
+            # the majority handedness) to match the absent-column fallback above.
+            hand_map = {"LHP": 0, "RHP": 1}
+            df["SP_HAND"] = (
+                df["SP_HAND"]
+                .map(hand_map)           # "LHP"→0, "RHP"→1, everything else→NaN
+                .fillna(1)               # "UNK", NaN, already-numeric → 1
+                .astype(int)
+            )
         return df
 
     # ── Private — Targets ─────────────────────────────────────────────────────
