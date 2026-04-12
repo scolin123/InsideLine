@@ -23,7 +23,8 @@ import os
 import time
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 import numpy as np
@@ -81,6 +82,7 @@ class GameOdds:
     over_juice:      Optional[int]   = None
     under_juice:     Optional[int]   = None
     bookmakers_used: list[str]       = field(default_factory=list)
+    commence_time:   Optional[str]   = None   # ISO 8601 UTC from Odds API
 
     # ── Convenience aliases ───────────────────────────────────────────────────
     @property
@@ -250,6 +252,15 @@ class OddsClient:
             )
 
         game = GameOdds(home_abv=home_abv, away_abv=away_abv)
+
+        raw_ct = raw.get("commence_time", "")
+        if raw_ct:
+            try:
+                dt_utc = datetime.fromisoformat(raw_ct.replace("Z", "+00:00"))
+                dt_et  = dt_utc.astimezone(ZoneInfo("America/New_York"))
+                game.commence_time = dt_et.strftime("%-m/%-d %-I:%M%p").lower().rstrip("m") + "ET"
+            except Exception:
+                game.commence_time = raw_ct
 
         home_mls:       list[int]   = []
         away_mls:       list[int]   = []
