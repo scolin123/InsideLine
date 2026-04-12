@@ -376,7 +376,7 @@ class ValueScanner:
         home_blended = sum(weights.get(w, 0) * v for w, v in home_eppas.items())
         away_blended = sum(weights.get(w, 0) * v for w, v in away_eppas.items())
         avg_pa       = (home_pa + away_pa) / 2.0
-        return round(home_blended * avg_pa + away_blended * avg_pa, 2)
+        return round((home_blended * avg_pa + away_blended * avg_pa) / 100.0, 2)
 
     def _cdf_win_prob(self, spread: float) -> float:
         """P(home wins outright) = Φ(proj_spread / σ). Positive spread → P > 0.5 ✓"""
