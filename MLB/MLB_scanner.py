@@ -71,9 +71,30 @@ MAX_KELLY_PCT: float          = 0.05   # [Guard 4] Grade A ceiling: 5 % of bankr
 GRADE_B_MAX_KELLY_PCT: float  = 0.025  # [Guard 4] Grade B ceiling: 2.5 % of bankroll
 SLATE_KELLY_CAP: float        = 0.25   # [Guard 6] max aggregate risk per slate
 
-# [Guard 1] win_prob floors
-GRADE_A_MIN_WIN_PROB: float   = 0.52
-GRADE_C_MAX_WIN_PROB: float   = 0.35
+# [Guard 1] Dual-gate grade thresholds
+# --- Grade A (standard: both win_prob AND EV must clear) ---
+GRADE_A_MIN_WIN_PROB: float        = 0.58   # ML / run-line win_prob floor
+GRADE_A_MIN_WIN_PROB_TOTAL: float  = 0.57   # totals win_prob floor (slightly lower — harder to call)
+GRADE_A_MIN_EV_ML: float           = 4.00   # $/100 EV floor — moneyline
+GRADE_A_MIN_EV_SPREAD: float       = 3.50   # $/100 EV floor — run line
+GRADE_A_MIN_EV_TOTAL: float        = 3.00   # $/100 EV floor — total
+GRADE_A_ML_EDGE: float             = 0.07   # probability edge floor (7 %)
+GRADE_A_SPREAD_EDGE: float         = 1.50   # run-line edge floor (runs)
+GRADE_A_TOTAL_EDGE: float          = 2.00   # totals edge floor (runs)
+# --- Grade B (both win_prob AND EV must clear, lower bars) ---
+GRADE_B_MIN_WIN_PROB: float        = 0.53
+GRADE_B_MIN_EV: float              = 1.50   # $/100
+GRADE_B_ML_EDGE: float             = 0.04   # 4 % probability edge floor
+GRADE_B_SPREAD_EDGE: float         = 0.75   # run-line edge floor (runs)
+GRADE_B_TOTAL_EDGE: float          = 1.50   # totals edge floor (runs)
+# --- Grade C (watch list — positive EV, above absolute floor, kelly = 0) ---
+GRADE_C_MAX_WIN_PROB: float        = 0.35   # absolute floor; below this → forced C
+# --- A-dog: underdog ML special track ---
+GRADE_ADOG_MARKET_PROB_MAX: float  = 0.45   # team must be a market underdog (≤ 45 % implied)
+GRADE_ADOG_MIN_WIN_PROB: float     = 0.40   # model must still see a real shot
+GRADE_ADOG_MIN_ML_EDGE: float      = 0.08   # probability edge over market (8 %)
+GRADE_ADOG_MIN_EV: float           = 5.00   # $/100 (underdogs need higher EV to offset variance)
+GRADE_ADOG_MAX_KELLY_PCT: float    = 0.03   # 3 % bankroll cap (vs 5 % for standard A)
 
 # [Guard 7] Moneyline safety valve threshold
 ML_FAVORITE_SAFETY_THRESHOLD: float = 0.85
@@ -323,10 +344,14 @@ class ValueScanner:
                     )
                 else:
                     ev    = self._raw_ev(ml_prob, ml_odds)
-                    grade = self.grade_play("MONEYLINE", ml_edge, ev, ml_prob)
+                    market_prob_for_side = market_prob if side == "HOME" else (1.0 - market_prob)
+                    grade = self.grade_play(
+                        "MONEYLINE", ml_edge, ev, ml_prob,
+                        market_prob=market_prob_for_side,
+                    )
                     kelly = (
                         self._kelly(ml_prob, ml_odds, bankroll, grade=grade)
-                        if grade in ("A", "B") else 0.0
+                        if grade in ("A", "A-dog", "B") else 0.0
                     )
                     result["plays"].append({
                         "type":      "MONEYLINE",
@@ -438,31 +463,37 @@ class ValueScanner:
 
     @staticmethod
     def grade_play(
-        bet_type: str,
-        edge:     float,
-        ev:       float,
-        win_prob: float,
+        bet_type:    str,
+        edge:        float,
+        ev:          float,
+        win_prob:    float,
+        market_prob: Optional[float] = None,
     ) -> str:
         """
         Assign a letter grade to a flagged play.
 
-        [Guard 1] Probability-weighted grading
-        ────────────────────────────────────────
-        Absolute Floor  : win_prob < 35 % → forced Grade C
-        Grade A Floor   : win_prob < 52 % → capped at Grade B
+        [Guard 1] Dual-gate grading — BOTH win_prob AND EV must clear
+        ────────────────────────────────────────────────────────────────
+        Absolute Floor  : win_prob < 35 % → forced Grade C (no bet)
+        EV < 0          : forced Grade C
 
-        MLB edge thresholds (re-calibrated from NBA)
-        ─────────────────────────────────────────────
-        Grade A  (High Value)
-          MONEYLINE       : |edge| ≥ 5 %  (probability delta)
-          RUN LINE/TOTAL  : |edge| ≥ 1.0 run   (was 12.5 pts in NBA)
+        Grade A  (High Confidence + High Value) — dual-gate AND
+          MONEYLINE  : |edge| ≥ 7 %  AND  win_prob ≥ 58 %  AND  EV ≥ $4.00
+          RUN LINE   : |edge| ≥ 1.5 runs AND win_prob ≥ 58 % AND EV ≥ $3.50
+          TOTAL      : |edge| ≥ 2.0 runs AND win_prob ≥ 57 % AND EV ≥ $3.00
 
-        Grade B  (Medium Value)
-          MONEYLINE       : 2 % ≤ |edge| < 5 %
-          RUN LINE/TOTAL  : 0.4 ≤ |edge| < 1.0 run  (was 4.0 pts in NBA)
+        Grade A-dog  (Underdog special track — ML only)
+          Applies when market implies ≤ 45 % win probability for the bet side.
+          Conditions: win_prob ≥ 40 %  AND  |ml_edge| ≥ 8 %  AND  EV ≥ $5.00
+          Kelly cap is 3 % (vs 5 % for standard A) to offset higher variance.
 
-        Grade C  (Low / –EV)
-          EV < 0, edge below Grade B threshold, or probability floor triggered.
+        Grade B  (Solid Value — dual-gate AND)
+          MONEYLINE  : |edge| ≥ 4 %  AND  win_prob ≥ 53 %  AND  EV ≥ $1.50
+          RUN LINE   : |edge| ≥ 0.75 runs AND win_prob ≥ 53 % AND EV ≥ $1.50
+          TOTAL      : |edge| ≥ 1.5 runs  AND win_prob ≥ 53 % AND EV ≥ $1.50
+
+        Grade C  (Watch list — positive EV, no Kelly allocation)
+          Positive EV, above absolute floor, but below B thresholds.
         """
         # ── Absolute floor ────────────────────────────────────────────────────
         if win_prob < GRADE_C_MAX_WIN_PROB:
@@ -478,17 +509,58 @@ class ValueScanner:
         abs_edge = abs(edge)
 
         if bet_type == "MONEYLINE":
-            if abs_edge >= 0.05:
-                return "A" if win_prob >= GRADE_A_MIN_WIN_PROB else "B"
-            if abs_edge >= 0.02:
+            # A-dog track: underdog with large model edge over market
+            if (
+                market_prob is not None
+                and market_prob <= GRADE_ADOG_MARKET_PROB_MAX
+                and win_prob >= GRADE_ADOG_MIN_WIN_PROB
+                and abs_edge >= GRADE_ADOG_MIN_ML_EDGE
+                and ev >= GRADE_ADOG_MIN_EV
+            ):
+                return "A-dog"
+            # Standard Grade A: dual-gate
+            if (
+                abs_edge >= GRADE_A_ML_EDGE
+                and win_prob >= GRADE_A_MIN_WIN_PROB
+                and ev >= GRADE_A_MIN_EV_ML
+            ):
+                return "A"
+            # Grade B: dual-gate (lower bars)
+            if (
+                abs_edge >= GRADE_B_ML_EDGE
+                and win_prob >= GRADE_B_MIN_WIN_PROB
+                and ev >= GRADE_B_MIN_EV
+            ):
                 return "B"
             return "C"
 
-        else:  # RUN LINE (SPREAD) or TOTAL
-            if abs_edge >= 1.0:
-                # [Guard 1] Grade A requires ≥ 52 % win probability
-                return "A" if win_prob >= GRADE_A_MIN_WIN_PROB else "B"
-            if abs_edge >= 0.4:
+        elif bet_type == "SPREAD":
+            if (
+                abs_edge >= GRADE_A_SPREAD_EDGE
+                and win_prob >= GRADE_A_MIN_WIN_PROB
+                and ev >= GRADE_A_MIN_EV_SPREAD
+            ):
+                return "A"
+            if (
+                abs_edge >= GRADE_B_SPREAD_EDGE
+                and win_prob >= GRADE_B_MIN_WIN_PROB
+                and ev >= GRADE_B_MIN_EV
+            ):
+                return "B"
+            return "C"
+
+        else:  # TOTAL
+            if (
+                abs_edge >= GRADE_A_TOTAL_EDGE
+                and win_prob >= GRADE_A_MIN_WIN_PROB_TOTAL
+                and ev >= GRADE_A_MIN_EV_TOTAL
+            ):
+                return "A"
+            if (
+                abs_edge >= GRADE_B_TOTAL_EDGE
+                and win_prob >= GRADE_B_MIN_WIN_PROB
+                and ev >= GRADE_B_MIN_EV
+            ):
                 return "B"
             return "C"
 
@@ -538,7 +610,12 @@ class ValueScanner:
         raw_bet = raw_bet * 0.5
 
         # [Guard 4] Grade-dependent ceiling
-        max_bet    = GRADE_B_MAX_KELLY_PCT * bankroll if grade == "B" else MAX_KELLY_PCT * bankroll
+        if grade == "B":
+            max_bet = GRADE_B_MAX_KELLY_PCT * bankroll
+        elif grade == "A-dog":
+            max_bet = GRADE_ADOG_MAX_KELLY_PCT * bankroll
+        else:
+            max_bet = MAX_KELLY_PCT * bankroll
         capped_bet = min(raw_bet, max_bet)
 
         if raw_bet > max_bet:
@@ -598,15 +675,15 @@ def print_projection(
                 f"(${SLATE_KELLY_CAP * bankroll:,.0f})"
             )
 
-        _GRADE_COLOR = {"A": _C.GREEN, "B": _C.YELLOW, "C": _C.RED}
+        _GRADE_COLOR = {"A": _C.GREEN, "A-dog": _C.GREEN, "B": _C.YELLOW, "C": _C.RED}
         for play in result["plays"]:
             grade       = play.get("grade", "?")
             grade_color = _GRADE_COLOR.get(grade, _C.RESET)
             grade_str   = _colorize(f"[{grade}]", grade_color)
             kelly_note  = (
                 f"  Kelly bet=${play['kelly_$']:,.2f}"
-                if grade in ("A", "B")
-                else "  Kelly bet=—  (grade C, no sizing)"
+                if grade in ("A", "A-dog", "B")
+                else "  Kelly bet=—  (watch list, no sizing)"
             )
             win_prob_pct = play.get("win_prob", 0.0) * 100
 
