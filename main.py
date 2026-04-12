@@ -380,7 +380,7 @@ def main() -> None:
     #   RUN_NBA=false python main.py          ← skip NBA for today
     #   RUN_NBA=false RUN_MLB=false python main.py  ← dry run / off-season
     #
-    RUN_NBA: bool = os.environ.get("RUN_NBA", "True").lower() == "true"
+    RUN_NBA: bool = os.environ.get("RUN_NBA", "False").lower() == "true"
     RUN_MLB: bool = os.environ.get("RUN_MLB", "True").lower() == "true"
 
 
