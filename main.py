@@ -161,8 +161,9 @@ def run_sport_pipeline(
 
             for play in result.get("plays", []):
                 sport_plays.append({
-                    "sport":   sport_name,
-                    "matchup": matchup,
+                    "sport":     sport_name,
+                    "matchup":   matchup,
+                    "game_time": getattr(game_odds, "commence_time", None) or "",
                     **play,
                 })
 
@@ -249,6 +250,7 @@ def _print_unified_summary(
     COL_GRADE   =  7
     COL_SPORT   =  5
     COL_MATCHUP = 14
+    COL_TIME    = 13
     COL_TYPE    = 10
     COL_SIDE    =  6
     COL_BOOK    =  8
@@ -263,6 +265,7 @@ def _print_unified_summary(
         f"  {'GRADE':<{COL_GRADE}}"
         f"  {'SPORT':<{COL_SPORT}}"
         f"  {'MATCHUP':<{COL_MATCHUP}}"
+        f"  {'TIME':<{COL_TIME}}"
         f"  {'TYPE':<{COL_TYPE}}"
         f"  {'SIDE':<{COL_SIDE}}"
         f"  {'BOOK':>{COL_BOOK}}"
@@ -313,10 +316,13 @@ def _print_unified_summary(
         raw_grade_col    = f"[{grade}]"
         grade_col_padded = grade_str + " " * max(0, COL_GRADE - len(raw_grade_col))
 
+        game_time = play.get("game_time", "") or ""
+
         row = (
             f"  {grade_col_padded}"
             f"  {sport:<{COL_SPORT}}"
             f"  {play['matchup']:<{COL_MATCHUP}}"
+            f"  {game_time:<{COL_TIME}}"
             f"  {play['type']:<{COL_TYPE}}"
             f"  {play['side']:<{COL_SIDE}}"
             f"  {book_str:>{COL_BOOK}}"
