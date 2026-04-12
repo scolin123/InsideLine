@@ -25,8 +25,8 @@ SEASONS: list[str] = ["2022", "2023", "2024", "2025"]
 
 # ── API / pipeline hyper-parameters ──────────────────────────────────────────
 API_SLEEP           = 0.50          # seconds between MLB Stats API calls
-EDGE_TOTAL_MIN      = 1.5           # minimum edge (runs) to flag a total play
-EDGE_SPREAD_MIN     = 0.75          # minimum edge (runs) to flag a run-line play
+EDGE_TOTAL_MIN      = 1.0           # minimum edge (runs) to flag a total play (C-tier floor)
+EDGE_SPREAD_MIN     = 0.40          # minimum edge (runs) to flag a run-line play (C-tier floor)
 KELLY_FRACTION      = 0.25          # fractional Kelly (25 % of full Kelly)
 LEAGUE_SIGMA        = 4.2           # historical scoring-margin std-dev (runs)
 # Blowout adjustment parameters (mirroring NBA structure, MLB-tuned)
