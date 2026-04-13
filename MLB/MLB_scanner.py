@@ -89,6 +89,10 @@ GRADE_B_SPREAD_EDGE: float         = 0.75   # run-line edge floor (runs)
 GRADE_B_TOTAL_EDGE: float          = 1.50   # totals edge floor (runs)
 # --- Grade C (watch list — positive EV, above absolute floor, kelly = 0) ---
 GRADE_C_MAX_WIN_PROB: float        = 0.35   # absolute floor; below this → forced C
+# --- Edge credibility ceiling (diagnostic: edges above this are likely model noise) ---
+MAX_CREDIBLE_EDGE: float           = 3.0    # [Guard 1] raw edge > 3 runs → forced C
+# --- UNDER-specific win_prob floor (unders are directionally fragile) ---
+GRADE_A_UNDER_MIN_WIN_PROB: float  = 0.62   # A-tier UNDER requires 62 % vs 57 % for OVER
 # --- A-dog: underdog ML special track ---
 GRADE_ADOG_MARKET_PROB_MAX: float  = 0.45   # team must be a market underdog (≤ 45 % implied)
 GRADE_ADOG_MIN_WIN_PROB: float     = 0.40   # model must still see a real shot
@@ -302,7 +306,7 @@ class ValueScanner:
                 total_win_prob = over_prob if side == "OVER" else (1.0 - over_prob)
 
                 ev    = self._raw_ev(total_win_prob, total_juice)
-                grade = self.grade_play("TOTAL", total_edge, ev, total_win_prob)
+                grade = self.grade_play("TOTAL", total_edge, ev, total_win_prob, bet_side=side)
                 kelly = (
                     self._kelly(total_win_prob, total_juice, bankroll,
                                 raw_edge=total_edge, grade=grade)
@@ -468,6 +472,7 @@ class ValueScanner:
         ev:          float,
         win_prob:    float,
         market_prob: Optional[float] = None,
+        bet_side:    Optional[str]   = None,
     ) -> str:
         """
         Assign a letter grade to a flagged play.
@@ -476,11 +481,14 @@ class ValueScanner:
         ────────────────────────────────────────────────────────────────
         Absolute Floor  : win_prob < 35 % → forced Grade C (no bet)
         EV < 0          : forced Grade C
+        Credibility Gate: |raw_edge| > 3.0 runs → forced Grade C (model noise)
 
         Grade A  (High Confidence + High Value) — dual-gate AND
           MONEYLINE  : |edge| ≥ 7 %  AND  win_prob ≥ 58 %  AND  EV ≥ $4.00
           RUN LINE   : |edge| ≥ 1.5 runs AND win_prob ≥ 58 % AND EV ≥ $3.50
-          TOTAL      : |edge| ≥ 2.0 runs AND win_prob ≥ 57 % AND EV ≥ $3.00
+          TOTAL OVER : |edge| ≥ 2.0 runs AND win_prob ≥ 57 % AND EV ≥ $3.00
+          TOTAL UNDER: |edge| ≥ 2.0 runs AND win_prob ≥ 62 % AND EV ≥ $3.00
+            (UNDER requires higher win_prob — one big inning destroys the bet)
 
         Grade A-dog  (Underdog special track — ML only)
           Applies when market implies ≤ 45 % win probability for the bet side.
@@ -507,6 +515,16 @@ class ValueScanner:
             return "C"
 
         abs_edge = abs(edge)
+
+        # ── [Guard 1] Edge credibility gate ───────────────────────────────────
+        # Edges above 3 runs are almost certainly ePPA model noise, not real
+        # signal. Force C so they never inflate Kelly or appear as A/B.
+        if abs_edge > MAX_CREDIBLE_EDGE:
+            log.debug(
+                "Grade forced to C: |edge|=%.2f runs exceeds credibility ceiling %.1f",
+                abs_edge, MAX_CREDIBLE_EDGE,
+            )
+            return "C"
 
         if bet_type == "MONEYLINE":
             # A-dog track: underdog with large model edge over market
@@ -550,9 +568,16 @@ class ValueScanner:
             return "C"
 
         else:  # TOTAL
+            # UNDER requires a higher win_prob floor than OVER: one big inning
+            # destroys an under regardless of overall projection accuracy.
+            a_total_win_prob = (
+                GRADE_A_UNDER_MIN_WIN_PROB
+                if bet_side == "UNDER"
+                else GRADE_A_MIN_WIN_PROB_TOTAL
+            )
             if (
                 abs_edge >= GRADE_A_TOTAL_EDGE
-                and win_prob >= GRADE_A_MIN_WIN_PROB_TOTAL
+                and win_prob >= a_total_win_prob
                 and ev >= GRADE_A_MIN_EV_TOTAL
             ):
                 return "A"
