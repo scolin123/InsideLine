@@ -313,15 +313,37 @@ class FeatureEngine:
     # ── Private — Feature detection ───────────────────────────────────────────
     @staticmethod
     def _detect_feature_cols(df: pd.DataFrame) -> list[str]:
-        """Auto-detect all numeric engineered columns to use as model inputs."""
-        exclude = {
-            "GAME_ID", "TEAM_ID", "OPP_TEAM_ID", "SP_ID", "OPP_SP_ID",
-            "SEASON", "WIN", "WL", "R", "OPP_R", "MARGIN",
-            "GAME_TOTAL", "RAW_PROJ_SPREAD", "RAW_PROJ_TOTAL",
+        """
+        Return only safe pre-game feature columns — no current-game box score stats.
+
+        Uses an allowlist instead of a denylist to prevent data leakage.
+        Raw per-game stats (OBP, SLG, WOBA, P_ERA, SP_ER, OPP_OBP, etc.) are
+        computed from the game being predicted and must never be used as features.
+        Only rolled/lagged averages and known pre-game context columns are safe.
+        """
+        # Pre-game context columns that don't encode current game outcome
+        pre_game_cols = {
+            "HOME", "DAYS_REST", "MILES_7D",
+            "PARK_FACTOR",      # fixed park index — pre-game venue info
+            "SP_HAND",          # starting pitcher handedness — known before game
+            "BP_PITCHES_3D",    # bullpen fatigue from prior 3 days — pre-game
         }
-        return [
-            c for c in df.columns
-            if c not in exclude
-            and df[c].dtype in [np.float64, np.int64, float, int]
-            and not df[c].isna().all()
-        ]
+
+        # Team rolling suffixes (_R5, _R10, _R20) and SP rolling (_RS5, _RS10)
+        roll_suffixes = (
+            tuple(f"_R{w}" for w in FeatureEngine.TEAM_ROLL_WINDOWS)
+            + tuple(f"_RS{w}" for w in FeatureEngine.SP_ROLL_WINDOWS)
+        )
+
+        allowed = []
+        for c in df.columns:
+            if df[c].dtype not in [np.float64, np.int64, float, int]:
+                continue
+            if df[c].isna().all():
+                continue
+            if c in pre_game_cols:
+                allowed.append(c)
+            elif any(c.endswith(s) for s in roll_suffixes):
+                allowed.append(c)
+
+        return allowed
