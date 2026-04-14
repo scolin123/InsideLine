@@ -116,15 +116,29 @@ class FeatureEngine:
 
     @staticmethod
     def _detect_feature_cols(df: pd.DataFrame) -> list[str]:
-        """Auto-detect all numeric engineered columns."""
-        exclude = {
-            "GAME_ID", "TEAM_ID", "OPP_TEAM_ID", "SEASON",
-            "WIN", "WL", "PTS", "OPP_PTS", "MARGIN",
-            "PROJ_TOTAL_RAW", "RAW_PROJ_SPREAD", "RAW_PROJ_TOTAL",
-        }
-        return [
-            c for c in df.columns
-            if c not in exclude
-            and df[c].dtype in [np.float64, np.int64, float, int]
-            and not df[c].isna().all()
-        ]
+        """
+        Return only safe pre-game feature columns — no current-game box score stats.
+
+        Uses an allowlist instead of a denylist to prevent data leakage.
+        Raw per-game stats (PPP, EFG_PCT, POSS, OPP_PPP, PACE_MATCHUP, etc.) are
+        computed from the game being predicted and must never be used as features.
+        Only rolling/lagged averages and known pre-game context columns are safe.
+        """
+        # Pre-game context columns that don't encode current game outcome
+        pre_game_cols = {"HOME", "DAYS_REST", "MILES_7D"}
+
+        # Rolling average suffixes (all built with shift(1) — no look-ahead)
+        roll_suffixes = tuple(f"_R{w}" for w in FeatureEngine.ROLL_WINDOWS)
+
+        allowed = []
+        for c in df.columns:
+            if df[c].dtype not in [np.float64, np.int64, float, int]:
+                continue
+            if df[c].isna().all():
+                continue
+            if c in pre_game_cols:
+                allowed.append(c)
+            elif any(c.endswith(s) for s in roll_suffixes):
+                allowed.append(c)
+
+        return allowed
