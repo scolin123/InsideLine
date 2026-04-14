@@ -59,6 +59,12 @@ from .MLB_config import (
     EDGE_TOTAL_MIN,
     EDGE_SPREAD_MIN,
     KELLY_FRACTION,
+    MARKET_BLEND_FACTOR_SPREAD,
+    MARKET_BLEND_FACTOR_TOTAL,
+    PROJ_SPREAD_MAX,
+    PROJ_TOTAL_MIN,
+    PROJ_TOTAL_MAX,
+    WIN_PROB_SHRINK_TO_50,
 )
 
 log = logging.getLogger(__name__)
@@ -90,7 +96,8 @@ GRADE_B_TOTAL_EDGE: float          = 1.50   # totals edge floor (runs)
 # --- Grade C (watch list — positive EV, above absolute floor, kelly = 0) ---
 GRADE_C_MAX_WIN_PROB: float        = 0.35   # absolute floor; below this → forced C
 # --- Edge credibility ceiling (diagnostic: edges above this are likely model noise) ---
-MAX_CREDIBLE_EDGE: float           = 3.0    # [Guard 1] raw edge > 3 runs → forced C
+MAX_CREDIBLE_EDGE: float           = 3.0    # [Guard 1] raw run/total edge > 3 → forced C
+MAX_CREDIBLE_ML_EDGE: float        = 0.20   # [Guard 1] ML prob edge > 20 % → forced C
 # --- UNDER-specific win_prob floor (unders are directionally fragile) ---
 GRADE_A_UNDER_MIN_WIN_PROB: float  = 0.62   # A-tier UNDER requires 62 % vs 57 % for OVER
 # --- A-dog: underdog ML special track ---
@@ -215,23 +222,85 @@ class ValueScanner:
         """
 
         # ── 1. Projected Run Line ─────────────────────────────────────────────
-        proj_spread = round(home_pred_runs - away_pred_runs, 2)
+        raw_proj_spread = round(home_pred_runs - away_pred_runs, 2)
+
+        # ── [Guard 10] Projection clamping ────────────────────────────────────
+        # Hard-cap raw XGBoost outputs before any downstream calculation.
+        # Anything outside ±PROJ_SPREAD_MAX is almost certainly model noise.
+        if abs(raw_proj_spread) > PROJ_SPREAD_MAX:
+            log.debug(
+                "[Guard 10] proj_spread clamped: raw=%.2f → ±%.1f",
+                raw_proj_spread, PROJ_SPREAD_MAX,
+            )
+        proj_spread = round(
+            math.copysign(min(abs(raw_proj_spread), PROJ_SPREAD_MAX), raw_proj_spread), 2
+        )
 
         # ── 2. Poisson total ─────────────────────────────────────────────────
-        proj_total = self._poisson_total(home_eppas, away_eppas, home_pa, away_pa)
+        raw_proj_total = self._poisson_total(home_eppas, away_eppas, home_pa, away_pa)
+
+        if not (PROJ_TOTAL_MIN <= raw_proj_total <= PROJ_TOTAL_MAX):
+            log.debug(
+                "[Guard 10] proj_total clamped: raw=%.2f → [%.1f, %.1f]",
+                raw_proj_total, PROJ_TOTAL_MIN, PROJ_TOTAL_MAX,
+            )
+        proj_total = round(
+            max(PROJ_TOTAL_MIN, min(raw_proj_total, PROJ_TOTAL_MAX)), 2
+        )
 
         # ── 3. Blowout adjustment ─────────────────────────────────────────────
-        # In baseball a blowout threshold is much lower (e.g. 5+ runs).
         garbage_adj = abs(proj_spread) > self.garbage_thr
         proj_total  = round(
             proj_total * (1 - self.garbage_pct) if garbage_adj else proj_total, 2
         )
 
-        # ── 4. Blended home win probability ──────────────────────────────────
-        cdf_win_prob   = self._cdf_win_prob(proj_spread)
-        blend_win_prob = round(
+        # ── 3.5. Market-line blending [Guard 14] ──────────────────────────────
+        # Pull the effective spread/total used for edges and win-probability
+        # calculations toward the market consensus.  The raw proj_spread and
+        # proj_total are preserved for display (PROJ column) so the full model
+        # disagreement remains visible.
+        #
+        # market_run_line convention: -1.5 = home fav
+        #   → market_implied_spread = -market_run_line = +1.5
+        if market_run_line is not None:
+            market_implied_spread = -market_run_line
+            eff_spread = round(
+                proj_spread * (1.0 - MARKET_BLEND_FACTOR_SPREAD)
+                + market_implied_spread * MARKET_BLEND_FACTOR_SPREAD,
+                2,
+            )
+            log.debug(
+                "[Guard 14] Spread blend: proj=%.2f  mkt_implied=%.2f  eff=%.2f",
+                proj_spread, market_implied_spread, eff_spread,
+            )
+        else:
+            eff_spread = proj_spread    # no market line → use raw projection
+
+        if market_total is not None:
+            eff_total = round(
+                proj_total * (1.0 - MARKET_BLEND_FACTOR_TOTAL)
+                + market_total * MARKET_BLEND_FACTOR_TOTAL,
+                2,
+            )
+            log.debug(
+                "[Guard 14] Total blend: proj=%.2f  mkt=%.2f  eff=%.2f",
+                proj_total, market_total, eff_total,
+            )
+        else:
+            eff_total = proj_total      # no market line → use raw projection
+
+        # ── 4. Blended + calibrated home win probability [Guard 8] ───────────
+        # CDF uses eff_spread (market-blended) so the win probability is also
+        # pulled toward consensus.  After blending model and CDF, shrink the
+        # result toward 50 % to prevent extreme model artefacts from producing
+        # unrealistically large moneyline edges.
+        cdf_win_prob   = self._cdf_win_prob(eff_spread)
+        blend_win_prob = (
             self.market_blend_factor * home_win_prob
-            + (1.0 - self.market_blend_factor) * cdf_win_prob, 4
+            + (1.0 - self.market_blend_factor) * cdf_win_prob
+        )
+        blend_win_prob = round(
+            0.5 + (blend_win_prob - 0.5) * WIN_PROB_SHRINK_TO_50, 4
         )
 
         fair_ml_home = self._prob_to_american_ml(blend_win_prob)
@@ -256,7 +325,7 @@ class ValueScanner:
             # home_cover_threshold = −market_run_line
             # run_line_edge = proj_spread − (−market_run_line)
             #               = proj_spread + market_run_line
-            run_line_edge = round(proj_spread + market_run_line, 2)
+            run_line_edge = round(eff_spread + market_run_line, 2)
             result["spread_edge"] = run_line_edge
 
             if abs(run_line_edge) >= self.edge_spread_min:
@@ -291,7 +360,7 @@ class ValueScanner:
 
         # ── 5b. Totals edge ───────────────────────────────────────────────────
         if market_total is not None:
-            total_edge = round(proj_total - market_total, 2)
+            total_edge = round(eff_total - market_total, 2)
             result["total_edge"] = total_edge
 
             if abs(total_edge) >= self.edge_total_min:
@@ -404,8 +473,8 @@ class ValueScanner:
         weights      = {5: 0.40, 10: 0.35, 20: 0.25}
         home_blended = sum(weights.get(w, 0) * v for w, v in home_eppas.items())
         away_blended = sum(weights.get(w, 0) * v for w, v in away_eppas.items())
-        avg_pa       = (home_pa + away_pa) / 2.0
-        return round((home_blended * avg_pa + away_blended * avg_pa) / 100.0, 2)
+        # Use each team's actual PA separately — not an average applied to both.
+        return round((home_blended * home_pa + away_blended * away_pa) / 100.0, 2)
 
     def _cdf_win_prob(self, spread: float) -> float:
         """P(home wins outright) = Φ(proj_spread / σ). Positive spread → P > 0.5 ✓"""
@@ -516,13 +585,22 @@ class ValueScanner:
 
         abs_edge = abs(edge)
 
-        # ── [Guard 1] Edge credibility gate ───────────────────────────────────
-        # Edges above 3 runs are almost certainly ePPA model noise, not real
-        # signal. Force C so they never inflate Kelly or appear as A/B.
-        if abs_edge > MAX_CREDIBLE_EDGE:
+        # ── [Guard 1] Edge credibility gates ──────────────────────────────────
+        # Run-line / total: edges above 3 runs are almost certainly ePPA noise.
+        if abs_edge > MAX_CREDIBLE_EDGE and bet_type != "MONEYLINE":
             log.debug(
-                "Grade forced to C: |edge|=%.2f runs exceeds credibility ceiling %.1f",
+                "Grade forced to C: |edge|=%.2f runs exceeds run/total ceiling %.1f",
                 abs_edge, MAX_CREDIBLE_EDGE,
+            )
+            return "C"
+
+        # Moneyline: probability edges above 20 % are implausible even after
+        # shrinkage — flag as noise (market + model can't disagree by >20 % on
+        # a well-calibrated system).
+        if bet_type == "MONEYLINE" and abs_edge > MAX_CREDIBLE_ML_EDGE:
+            log.debug(
+                "ML grade forced to C: |edge|=%.3f exceeds ML ceiling %.2f",
+                abs_edge, MAX_CREDIBLE_ML_EDGE,
             )
             return "C"
 
