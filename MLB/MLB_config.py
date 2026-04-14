@@ -29,6 +29,28 @@ EDGE_TOTAL_MIN      = 1.0           # minimum edge (runs) to flag a total play (
 EDGE_SPREAD_MIN     = 0.40          # minimum edge (runs) to flag a run-line play (C-tier floor)
 KELLY_FRACTION      = 0.25          # fractional Kelly (25 % of full Kelly)
 LEAGUE_SIGMA        = 4.2           # historical scoring-margin std-dev (runs)
+
+# ── [Guard 14] Market-line blending ──────────────────────────────────────────
+# Before computing edges, blend raw model projection toward the market line.
+# Effect: a 10-run raw proj_spread on a -1.5 market becomes a ~7.0 eff_spread.
+# Tune: 0.20 = mild humility  |  0.35 = strong humility
+# When no market line is available, eff_spread == proj_spread (no blending).
+MARKET_BLEND_FACTOR_SPREAD: float = 0.30  # 30 % pull toward market run line
+MARKET_BLEND_FACTOR_TOTAL:  float = 0.25  # 25 % pull toward market total
+
+# ── [Guard 10] Projection clamping ────────────────────────────────────────────
+# Hard limits on raw XGBoost outputs before any downstream calculation.
+# MLB historical extremes: scoring margin rarely exceeds ±6, totals rarely
+# outside 4–18.  Anything beyond this is almost certainly model noise.
+PROJ_SPREAD_MAX:    float = 6.0    # ± run ceiling on raw proj_spread
+PROJ_TOTAL_MIN:     float = 4.0    # floor on proj_total (historically < 5 is rare)
+PROJ_TOTAL_MAX:     float = 18.0   # ceiling on proj_total
+
+# ── [Guard 8] Win-probability shrinkage toward 50 % ─────────────────────────
+# After blending model and CDF win probs, pull the result back toward 50 %.
+# Prevents extreme model artefacts from producing unrealistically large ML edges.
+# 0.85 → blend is pulled 15 % of the way back toward a coin flip.
+WIN_PROB_SHRINK_TO_50: float = 0.85
 # Blowout adjustment parameters (mirroring NBA structure, MLB-tuned)
 GARBAGE_SPREAD_THR  = 5.0           # run differential at which blowout adjustment kicks in
 GARBAGE_ADJUST_PCT  = 0.08          # 8 % total reduction for projected blowouts
