@@ -217,6 +217,17 @@ BPLUS_EDGE_CLOSE_ML: float      = 0.01   # within 0.01 of A edge (ML)
 BPLUS_PROB_CLOSE: float         = 0.01   # within 0.01 of A win_prob (spread/total)
 BPLUS_ML_PROB_CLOSE: float      = 0.015  # within 0.015 of A win_prob (ML)
 
+# ── Post-diagnostic guards ────────────────────────────────────────────────────
+# [Guard 1-ext] Large market spread cap: if the market already prices a team at
+# ±13+ pts, covering that number is far less reliable than covering a normal
+# spread.  Plays with |market_spread| > this threshold are capped at grade B.
+LARGE_MARKET_SPREAD_THR: float  = 13.0   # absolute market spread (pts)
+
+# [Guard 1-ext] UNDER-specific win_prob floor for A-tier totals.
+# NBA unders are fragile — pace spikes and garbage-time offense blow them up.
+# Require 63 % vs the standard 58.5 % OVER floor to reach A.
+GRADE_A_UNDER_WIN_PROB: float   = 0.63
+
 # ── Convenience aliases (keep callers that reference old flat constants) ──────
 # A-tier
 GRADE_A_SPREAD_EDGE: float      = GRADE_THRESHOLDS["spread"]["A"]["edge"]
@@ -998,7 +1009,10 @@ class ValueScanner:
                 )
 
                 ev    = self._raw_ev(adj_spread_prob, spread_juice)
-                grade = self.grade_play("SPREAD", adj_spread_edge, ev, adj_spread_prob)
+                grade = self.grade_play(
+                    "SPREAD", adj_spread_edge, ev, adj_spread_prob,
+                    market_spread=market_spread,
+                )
 
                 # grade_play returns None for sub-C quality — skip entirely
                 if grade is not None and grade in DISPLAY_GRADES:
@@ -1078,7 +1092,10 @@ class ValueScanner:
                 )
 
                 ev    = self._raw_ev(adj_total_prob, total_juice)
-                grade = self.grade_play("TOTAL", adj_total_edge, ev, adj_total_prob)
+                grade = self.grade_play(
+                    "TOTAL", adj_total_edge, ev, adj_total_prob,
+                    bet_side=side,
+                )
 
                 if grade is not None and grade in DISPLAY_GRADES:
                     quality = _play_quality_score(
@@ -1561,7 +1578,12 @@ class ValueScanner:
 
     @staticmethod
     def grade_play(
-        bet_type: str, edge: float, ev: float, win_prob: float
+        bet_type:     str,
+        edge:         float,
+        ev:           float,
+        win_prob:     float,
+        bet_side:     Optional[str]   = None,
+        market_spread: Optional[float] = None,
     ) -> Optional[str]:
         """
         Assign a letter grade, or return None if the play is below C-tier quality.
@@ -1598,8 +1620,17 @@ class ValueScanner:
         A-tier thresholds (strict, most trustworthy — always bettable):
         ─────────────────────────────────────────────────────────────────
           SPREAD  : calibrated_edge ≥ 8.0 pts  AND win_prob ≥ 58.5 % (was 7.0/56%)
-          TOTAL   : calibrated_edge ≥ 9.5 pts  AND win_prob ≥ 58.5 % (was 8.0/56%)
+          TOTAL OVER  : calibrated_edge ≥ 9.5 pts AND win_prob ≥ 58.5 %
+          TOTAL UNDER : calibrated_edge ≥ 9.5 pts AND win_prob ≥ 63.0 %
+            (UNDER requires higher floor — pace spikes and garbage-time offense
+             regularly blow up NBA unders regardless of projection accuracy)
           ML      : edge ≥ 8 %               AND win_prob ≥ 60 %    (was 7%/58%)
+
+        Large market spread gate:
+        ─────────────────────────────────────────────────────────────────
+          If |market_spread| > 13 pts, the play is capped at grade B.
+          Covering 16.5 pts is far less reliable than covering 6.5 pts;
+          this gate caught the MEM/MIL/UTA/WSH failures from 2025-04-11.
 
         IMPORTANT (v8): inputs to grade_play() should already be fragility-adjusted
         (via apply_fragility_discount()).  The thresholds have been tightened so
@@ -1642,6 +1673,21 @@ class ValueScanner:
 
         elif bet_type == "SPREAD":
             thr = GRADE_THRESHOLDS["spread"]
+            # [Guard 1-ext] Large market spread cap: covering 13+ pts is too
+            # uncertain to warrant A/B+ — skip straight to B/C evaluation.
+            if (
+                market_spread is not None
+                and abs(market_spread) > LARGE_MARKET_SPREAD_THR
+            ):
+                log.debug(
+                    "Large spread cap: |market_spread|=%.1f > %.1f — capped at B",
+                    abs(market_spread), LARGE_MARKET_SPREAD_THR,
+                )
+                if abs_edge >= thr["B"]["edge"] and win_prob >= thr["B"]["win_prob"]:
+                    return "B"
+                if abs_edge >= thr["C"]["edge"] and win_prob >= thr["C"]["win_prob"]:
+                    return "C"
+                return None
             # A-tier
             if abs_edge >= thr["A"]["edge"] and win_prob >= thr["A"]["win_prob"]:
                 return "A"
@@ -1660,8 +1706,16 @@ class ValueScanner:
 
         else:  # TOTAL
             thr = GRADE_THRESHOLDS["total"]
+            # [Guard 1-ext] UNDER-specific A-tier win_prob floor.
+            # NBA unders are fragile — pace spikes and garbage-time scoring
+            # routinely blow them up regardless of projection accuracy.
+            a_win_prob = (
+                GRADE_A_UNDER_WIN_PROB
+                if bet_side == "UNDER"
+                else thr["A"]["win_prob"]
+            )
             # A-tier
-            if abs_edge >= thr["A"]["edge"] and win_prob >= thr["A"]["win_prob"]:
+            if abs_edge >= thr["A"]["edge"] and win_prob >= a_win_prob:
                 return "A"
             # B+-tier
             if (abs_edge >= thr["B_PLUS"]["edge"]
