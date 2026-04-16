@@ -79,32 +79,36 @@ SLATE_KELLY_CAP: float        = 0.25   # [Guard 6] max aggregate risk per slate
 
 # [Guard 1] Dual-gate grade thresholds
 # --- Grade A (standard: both win_prob AND EV must clear) ---
-GRADE_A_MIN_WIN_PROB: float        = 0.58   # ML / run-line win_prob floor
-GRADE_A_MIN_WIN_PROB_TOTAL: float  = 0.57   # totals win_prob floor (slightly lower — harder to call)
-GRADE_A_MIN_EV_ML: float           = 4.00   # $/100 EV floor — moneyline
-GRADE_A_MIN_EV_SPREAD: float       = 3.50   # $/100 EV floor — run line
-GRADE_A_MIN_EV_TOTAL: float        = 3.00   # $/100 EV floor — total
-GRADE_A_ML_EDGE: float             = 0.07   # probability edge floor (7 %)
-GRADE_A_SPREAD_EDGE: float         = 1.50   # run-line edge floor (runs)
-GRADE_A_TOTAL_EDGE: float          = 2.00   # totals edge floor (runs)
+# Raised significantly — targeting 2-3 A-tier MLB bets/night.
+# MLB model MAE ~2.5 runs, so edges below that threshold are indistinguishable
+# from noise. A-tier must clear the noise floor with meaningful margin.
+GRADE_A_MIN_WIN_PROB: float        = 0.66   # ML / run-line win_prob floor  (was 0.58)
+GRADE_A_MIN_WIN_PROB_TOTAL: float  = 0.65   # totals win_prob floor          (was 0.57)
+GRADE_A_MIN_EV_ML: float           = 8.00   # $/100 EV floor — moneyline    (was 4.00)
+GRADE_A_MIN_EV_SPREAD: float       = 7.00   # $/100 EV floor — run line     (was 3.50)
+GRADE_A_MIN_EV_TOTAL: float        = 6.00   # $/100 EV floor — total        (was 3.00)
+GRADE_A_ML_EDGE: float             = 0.15   # probability edge floor (15 %)  (was 0.07)
+GRADE_A_SPREAD_EDGE: float         = 2.00   # run-line edge floor (runs)     (was 1.50)
+GRADE_A_TOTAL_EDGE: float          = 2.50   # totals edge floor (runs)       (was 2.00)
 # --- Grade B (both win_prob AND EV must clear, lower bars) ---
-GRADE_B_MIN_WIN_PROB: float        = 0.53
-GRADE_B_MIN_EV: float              = 1.50   # $/100
-GRADE_B_ML_EDGE: float             = 0.04   # 4 % probability edge floor
-GRADE_B_SPREAD_EDGE: float         = 0.75   # run-line edge floor (runs)
-GRADE_B_TOTAL_EDGE: float          = 1.50   # totals edge floor (runs)
+# Shifted up slightly to absorb former borderline-A bets.
+GRADE_B_MIN_WIN_PROB: float        = 0.55   # (was 0.53)
+GRADE_B_MIN_EV: float              = 2.50   # $/100  (was 1.50)
+GRADE_B_ML_EDGE: float             = 0.07   # 7 % probability edge floor     (was 0.04)
+GRADE_B_SPREAD_EDGE: float         = 1.00   # run-line edge floor (runs)     (was 0.75)
+GRADE_B_TOTAL_EDGE: float          = 1.75   # totals edge floor (runs)       (was 1.50)
 # --- Grade C (watch list — positive EV, above absolute floor, kelly = 0) ---
 GRADE_C_MAX_WIN_PROB: float        = 0.35   # absolute floor; below this → forced C
 # --- Edge credibility ceiling (diagnostic: edges above this are likely model noise) ---
 MAX_CREDIBLE_EDGE: float           = 3.0    # [Guard 1] raw run/total edge > 3 → forced C
 MAX_CREDIBLE_ML_EDGE: float        = 0.20   # [Guard 1] ML prob edge > 20 % → forced C
 # --- UNDER-specific win_prob floor (unders are directionally fragile) ---
-GRADE_A_UNDER_MIN_WIN_PROB: float  = 0.62   # A-tier UNDER requires 62 % vs 57 % for OVER
+GRADE_A_UNDER_MIN_WIN_PROB: float  = 0.70   # A-tier UNDER requires 70 % win prob  (was 0.62)
 # --- A-dog: underdog ML special track ---
 GRADE_ADOG_MARKET_PROB_MAX: float  = 0.45   # team must be a market underdog (≤ 45 % implied)
 GRADE_ADOG_MIN_WIN_PROB: float     = 0.40   # model must still see a real shot
-GRADE_ADOG_MIN_ML_EDGE: float      = 0.08   # probability edge over market (8 %)
-GRADE_ADOG_MIN_EV: float           = 5.00   # $/100 (underdogs need higher EV to offset variance)
+GRADE_ADOG_MIN_ML_EDGE: float      = 0.12   # probability edge over market (12 %)   (was 0.08)
+GRADE_ADOG_MIN_EV: float           = 7.00   # $/100 (underdogs need higher EV)       (was 5.00)
 GRADE_ADOG_MAX_KELLY_PCT: float    = 0.03   # 3 % bankroll cap (vs 5 % for standard A)
 
 # [Guard 7] Moneyline safety valve threshold
@@ -354,6 +358,7 @@ class ValueScanner:
                     "grade":       grade,
                     "kelly_$":     kelly,
                     "win_prob":    round(rl_win_prob, 4),
+                    "odds":        run_line_juice,
                     "market_line": market_run_line,
                     "proj_line":   proj_spread,
                 })
@@ -389,6 +394,7 @@ class ValueScanner:
                     "grade":       grade,
                     "kelly_$":     kelly,
                     "win_prob":    round(total_win_prob, 4),
+                    "odds":        total_juice,
                     "market_line": market_total,
                     "proj_line":   proj_total,
                 })
@@ -434,6 +440,7 @@ class ValueScanner:
                         "grade":     grade,
                         "kelly_$":   kelly,
                         "win_prob":  round(ml_prob, 4),
+                        "odds":      ml_odds,
                         "market_line": None,
                         "proj_line":   None,
                     })
@@ -795,11 +802,15 @@ def print_projection(
             else:
                 edge_display = f"{play['edge']:+.2f} runs"
 
+            odds_val = play.get("odds")
+            odds_str = f"  odds={odds_val:+d}" if odds_val is not None else ""
+
             print(
                 f"  ✦ {grade_str} {play['type']:<10} {play['side']:<5}"
                 f"  edge={edge_display}"
                 f"  prob={win_prob_pct:.1f}%"
                 f"  EV=${play.get('ev', 0):+.2f}"
+                f"{odds_str}"
                 f"{kelly_note}"
             )
     else:
