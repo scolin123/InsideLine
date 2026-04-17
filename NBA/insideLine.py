@@ -62,6 +62,7 @@ class GameOdds:
     over_juice:      Optional[int]   = None
     under_juice:     Optional[int]   = None
     bookmakers_used: list[str]       = field(default_factory=list)
+    commence_time:   Optional[str]   = None   # human-readable ET tipoff, e.g. "April 17th @ 7:30"
 
     @property
     def consensus_total(self) -> Optional[float]:
@@ -212,6 +213,22 @@ class OddsClient:
             )
 
         game = GameOdds(home_abv=home_abv, away_abv=away_abv)
+
+        # Parse tipoff time → ET human-readable string (mirrors MLB implementation)
+        raw_ct = raw.get("commence_time", "")
+        if raw_ct:
+            try:
+                from zoneinfo import ZoneInfo
+                dt_utc = datetime.fromisoformat(raw_ct.replace("Z", "+00:00"))
+                dt_et  = dt_utc.astimezone(ZoneInfo("America/New_York"))
+                day    = dt_et.day
+                suffix = "th" if 11 <= (day % 100) <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+                hour   = dt_et.hour % 12 or 12
+                minute = dt_et.strftime("%M")
+                am_pm  = "PM" if dt_et.hour >= 12 else "AM"
+                game.commence_time = f"{dt_et.strftime('%B')} {day}{suffix} @ {hour}:{minute} {am_pm}"
+            except Exception:
+                game.commence_time = raw_ct
 
         home_mls:      list[int]   = []
         away_mls:      list[int]   = []
