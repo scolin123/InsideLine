@@ -452,7 +452,7 @@ def run_pipeline(
     market_spread:  Optional[float]             = None,  # home run line (−1.5 / +1.5)
     market_total:   Optional[float]             = None,
     market_ml_home: Optional[int]               = None,
-    market_ml_away: Optional[int]               = None,  # accepted but unused (scanner derives away ML internally)
+    market_ml_away: Optional[int]               = None,  # away ML — required alongside market_ml_home for devigged edge
     bankroll:       float                       = 1000.0,
     live_odds:      bool                        = False,
     odds_api_key:   Optional[str]               = None,
@@ -492,9 +492,11 @@ def run_pipeline(
                 market_spread  = game_odds.home_run_line
                 market_total   = game_odds.consensus_total
                 market_ml_home = game_odds.home_ml
+                market_ml_away = game_odds.away_ml
                 log.info(
                     f"Live lines  →  Run Line: {market_spread}  "
                     f"Total: {market_total}  ML(home): {market_ml_home:+d}  "
+                    f"ML(away): {market_ml_away:+d}  "
                     f"Books: {', '.join(game_odds.bookmakers_used[:4])} …"
                 )
         except RuntimeError as exc:
@@ -571,6 +573,7 @@ def run_pipeline(
         market_run_line = market_spread,
         market_total    = market_total,
         market_ml_home  = market_ml_home,
+        market_ml_away  = market_ml_away,
         bankroll        = bankroll,
     )
 
