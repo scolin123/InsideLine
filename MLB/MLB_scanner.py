@@ -139,6 +139,29 @@ def _colorize(text: str, code: str) -> str:
     return f"{code}{text}{_C.RESET}"
 
 
+def devig_two_way_probs(home_ml: int, away_ml: int) -> tuple:
+    """
+    Remove the bookmaker's vig from a two-sided moneyline market and return
+    fair (normalised) win probabilities for home and away.
+
+    Method: Additive — divide each raw implied prob by their sum so they
+    sum to exactly 1.0.
+
+    Returns
+    -------
+    (fair_home_prob, fair_away_prob)  — each in [0, 1], sum == 1.0
+    """
+    def _implied(ml: int) -> float:
+        return abs(ml) / (abs(ml) + 100.0) if ml < 0 else 100.0 / (ml + 100.0)
+
+    raw_home = _implied(home_ml)
+    raw_away = _implied(away_ml)
+    total    = raw_home + raw_away
+    if total <= 0:
+        return 0.5, 0.5
+    return raw_home / total, raw_away / total
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  VALUE SCANNER  (MLB)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -204,6 +227,7 @@ class ValueScanner:
         market_run_line:  Optional[float] = None,  # home run line (−1.5 or +1.5)
         market_total:     Optional[float] = None,
         market_ml_home:   Optional[int]   = None,
+        market_ml_away:   Optional[int]   = None,
         bankroll:         float           = 1000.0,
         run_line_juice:   int             = -110,
         total_juice:      int             = -110,
@@ -400,21 +424,37 @@ class ValueScanner:
                 })
 
         # ── 5c. Moneyline edge ────────────────────────────────────────────────
-        if market_ml_home is not None:
-            market_prob = self._american_ml_to_prob(market_ml_home)
-            ml_edge     = round(blend_win_prob - market_prob, 4)
+        # Requires BOTH sides to properly remove the bookmaker's vig before
+        # computing edge.  _flip_ml() is no longer used for edge detection —
+        # it was comparing model prob against a vigged market prob, causing
+        # side-selection errors and inflated away EV.
+        if market_ml_home is not None and market_ml_away is not None:
+            fair_mkt_home, fair_mkt_away = devig_two_way_probs(
+                market_ml_home, market_ml_away
+            )
+
+            ml_edge_home = round(blend_win_prob - fair_mkt_home, 4)
+            ml_edge_away = round((1.0 - blend_win_prob) - fair_mkt_away, 4)
+
+            # Pick the side with the larger positive edge (mirrors NBA logic)
+            if abs(ml_edge_home) >= abs(ml_edge_away):
+                ml_edge = ml_edge_home
+                side    = "HOME"
+                ml_prob = blend_win_prob
+                ml_odds = market_ml_home
+                market_prob_for_side = fair_mkt_home
+            else:
+                ml_edge = ml_edge_away
+                side    = "AWAY"
+                ml_prob = round(1.0 - blend_win_prob, 4)
+                ml_odds = market_ml_away
+                market_prob_for_side = fair_mkt_away
+
             result["ml_edge"] = ml_edge
 
-            if abs(ml_edge) >= 0.03:
-                side    = "HOME" if ml_edge > 0 else "AWAY"
-                ml_prob = blend_win_prob if side == "HOME" else (1.0 - blend_win_prob)
-                ml_odds = (
-                    market_ml_home if side == "HOME"
-                    else self._flip_ml(market_ml_home)
-                )
-
+            if ml_edge > 0 and abs(ml_edge) >= 0.03:
                 # [Guard 7] Suppress ML plays on near-certain favourites.
-                fav_prob = max(market_prob, 1.0 - market_prob)
+                fav_prob = max(fair_mkt_home, fair_mkt_away)
                 if fav_prob > ML_FAVORITE_SAFETY_THRESHOLD:
                     log.debug(
                         "[Guard 7] Moneyline suppressed: fav_prob=%.3f > %.2f  "
@@ -423,7 +463,6 @@ class ValueScanner:
                     )
                 else:
                     ev    = self._raw_ev(ml_prob, ml_odds)
-                    market_prob_for_side = market_prob if side == "HOME" else (1.0 - market_prob)
                     grade = self.grade_play(
                         "MONEYLINE", ml_edge, ev, ml_prob,
                         market_prob=market_prob_for_side,
@@ -444,6 +483,13 @@ class ValueScanner:
                         "market_line": None,
                         "proj_line":   None,
                     })
+
+        elif market_ml_home is not None:
+            log.info(
+                "ML betting skipped: market_ml_away not provided. "
+                "Supply both sides for proper vig removal."
+            )
+            result["ml_skipped_reason"] = "market_ml_away missing; both sides required"
 
         # ── [Guard 6] Slate-level bankroll cap ────────────────────────────────
         plays_with_kelly = [p for p in result["plays"] if p["kelly_$"] > 0]
