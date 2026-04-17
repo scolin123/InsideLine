@@ -1,1 +1,4 @@
 .env
+gsheet_creds.json
+MLB/__pycache__
+NBA/__pycache__
