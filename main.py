@@ -14,10 +14,18 @@ Set RUN_NBA / RUN_MLB to False here, or override via .env:
 """
 import os
 import logging
+import datetime as dt
 from datetime import datetime
 from typing import Optional
 
 from supabase import Client as SupabaseClient
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials as _GSCredentials
+    _GSPREAD_AVAILABLE = True
+except ImportError:
+    _GSPREAD_AVAILABLE = False
 
 # ── NBA package imports ───────────────────────────────────────────────────────
 # NOTE: files live at NBA/config.py, NBA/insideLine.py, NBA/scanner.py
@@ -81,7 +89,14 @@ def run_sport_pipeline(
     sep = "═" * 64
 
     # ── Resolve callables and config from module references ───────────────────
-    api_key         = os.environ.get("ODDS_API_KEY", getattr(config_module, "ODDS_API_KEY", ""))
+    # Build a key pool: ODDS_API_KEY is primary, ODDS_API_KEY_2 / _3 / etc. are fallbacks.
+    _primary_key = os.environ.get("ODDS_API_KEY", getattr(config_module, "ODDS_API_KEY", ""))
+    _extra_keys  = [
+        os.environ.get(f"ODDS_API_KEY_{i}", "")
+        for i in range(2, 10)
+    ]
+    api_key_pool = [k for k in [_primary_key] + _extra_keys if k and k != "YOUR_ODDS_API_KEY_HERE"]
+
     edge_spread_min = getattr(config_module, "EDGE_SPREAD_MIN", 1.5)
     edge_total_min  = getattr(config_module, "EDGE_TOTAL_MIN",  0.5)
 
@@ -90,17 +105,33 @@ def run_sport_pipeline(
     run_pipeline_fn = getattr(line_module, "run_pipeline")
     save_fn         = getattr(line_module, "save_to_supabase")
 
-    # ── Step 1: Fetch live odds slate ─────────────────────────────────────────
+    # ── Step 1: Fetch live odds slate (try each key in pool until one succeeds) ─
     print(f"\n{sep}")
     print(f"  {sport_name} VALUE SCANNER  ·  "
           f"{datetime.now().strftime('%A %B %d, %Y  %H:%M')}")
     print(sep)
 
-    try:
-        odds_client = OddsClientCls(api_key=api_key)
-        live_games  = odds_client.fetch()
-    except RuntimeError as exc:
-        log.error(f"{sport_name} OddsClient failed: {exc}")
+    odds_client = None
+    live_games  = None
+    last_exc    = None
+
+    for idx, key in enumerate(api_key_pool):
+        try:
+            client     = OddsClientCls(api_key=key)
+            live_games = client.fetch()
+            odds_client = client
+            if idx > 0:
+                log.info(f"{sport_name}: using fallback API key #{idx + 1} (primary exhausted).")
+                print(f"  ⚠  Using fallback Odds API key #{idx + 1} (primary key exhausted).")
+            break
+        except RuntimeError as exc:
+            last_exc = exc
+            log.warning(f"{sport_name}: API key #{idx + 1} failed — {exc}")
+            if idx + 1 < len(api_key_pool):
+                log.info(f"{sport_name}: trying next key in pool …")
+
+    if live_games is None:
+        log.error(f"{sport_name} OddsClient: all {len(api_key_pool)} key(s) failed. Last error: {last_exc}")
         log.error(f"Skipping {sport_name} slate entirely.")
         return []
 
@@ -257,6 +288,7 @@ def _print_unified_summary(
     COL_PROJ    =  8
     COL_EDGE    = 10
     COL_EV      =  9
+    COL_ODDS    =  7
     COL_KELLY   = 12
 
     _GRADE_COLOR = {"A": _C.GREEN, "B": _C.YELLOW, "C": _C.RED}
@@ -272,6 +304,7 @@ def _print_unified_summary(
         f"  {'PROJ':>{COL_PROJ}}"
         f"  {'EDGE':>{COL_EDGE}}"
         f"  {'EV($100)':>{COL_EV}}"
+        f"  {'ODDS':>{COL_ODDS}}"
         f"  {'KELLY':>{COL_KELLY}}"
     )
     divider = "  " + "─" * (len(header) - 2)
@@ -318,6 +351,9 @@ def _print_unified_summary(
 
         game_time = play.get("game_time", "") or ""
 
+        odds_val = play.get("odds")
+        odds_str = f"{odds_val:+d}" if odds_val is not None else "—"
+
         row = (
             f"  {grade_col_padded}"
             f"  {sport:<{COL_SPORT}}"
@@ -329,6 +365,7 @@ def _print_unified_summary(
             f"  {proj_str:>{COL_PROJ}}"
             f"  {edge_str:>{COL_EDGE}}"
             f"  {ev_str:>{COL_EV}}"
+            f"  {odds_str:>{COL_ODDS}}"
             f"  {kelly_str:>{COL_KELLY}}"
         )
         print(row)
@@ -373,6 +410,118 @@ def _print_unified_summary(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  GOOGLE SHEETS  (optional — gracefully skipped when credentials are absent)
+# ══════════════════════════════════════════════════════════════════════════════
+def _init_gsheets():
+    """
+    Initialise a gspread Worksheet from env credentials.
+    Returns None (with a warning) when credentials are missing or gspread is
+    not installed — the rest of the pipeline continues unaffected.
+    """
+    if not _GSPREAD_AVAILABLE:
+        log.warning(
+            "gspread / google-auth not installed — Google Sheets write skipped. "
+            "Run: pip install gspread google-auth"
+        )
+        return None
+
+    creds_path = os.environ.get("GOOGLE_SHEETS_CREDS_PATH", "")
+    sheet_id   = os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID", "")
+
+    if not creds_path or not sheet_id:
+        log.warning(
+            "Google Sheets credentials missing — "
+            "GOOGLE_SHEETS_CREDS_PATH / GOOGLE_SHEETS_SPREADSHEET_ID "
+            "not set in .env. Sheet write skipped."
+        )
+        return None
+
+    try:
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds  = _GSCredentials.from_service_account_file(creds_path, scopes=scopes)
+        gc     = gspread.authorize(creds)
+        sheet  = gc.open_by_key(sheet_id).sheet1
+        log.info("Google Sheets client initialised successfully.")
+        return sheet
+    except Exception as exc:
+        log.warning(f"Google Sheets init failed: {exc} — sheet write skipped.")
+        return None
+
+
+def _write_plays_to_sheets(sheet, plays: list[dict], run_date: dt.date) -> None:
+    """
+    Append a date-divider row followed by one row per play to the Google Sheet.
+    Columns (12 total, matching existing sheet layout):
+      Date | Grade | League | Matchup | Date/Time | Market | Side |
+      Line | Proj. Result | Margin | EV | Wager
+
+    NOTE: value_input_option="RAW" is intentional — prevents Google Sheets from
+    interpreting margin strings like "+0.10 runs" as formulas (#ERROR!) or
+    converting "+8.60%" to the decimal 0.086.
+    """
+    date_iso   = run_date.isoformat()                               # e.g. "2026-04-17"
+    date_label = f"CURRENT - {run_date.strftime('%A, %B %d, %Y').upper()}"
+    rows = [[date_label] + [""] * 11]                               # 12 columns total
+
+    for play in plays:
+        sport  = play.get("sport", "")
+        ptype  = play.get("type", "")
+        edge   = play.get("edge", 0.0)
+        kelly  = play.get("kelly_$", 0.0)
+        grade  = play.get("grade", "")
+
+        # Line / Proj. Result
+        if ptype == "MONEYLINE":
+            line_str = "-"
+            proj_str = "-"
+        elif ptype == "SPREAD":
+            line_val = play.get("market_line")
+            proj_val = play.get("proj_line")
+            line_str = f"{line_val:+.1f}" if line_val is not None else "-"
+            proj_str = f"{proj_val:+.1f}" if proj_val is not None else "-"
+        else:  # TOTAL
+            line_val = play.get("market_line")
+            proj_val = play.get("proj_line")
+            line_str = f"{line_val:.1f}" if line_val is not None else "-"
+            proj_str = f"{proj_val:.1f}" if proj_val is not None else "-"
+
+        # Margin — strip leading + so Sheets doesn't try to evaluate as formula
+        if ptype == "MONEYLINE":
+            margin_str = f"{edge * 100:.2f}%"
+            if edge >= 0:
+                margin_str = f"+{margin_str}"
+        elif sport == "MLB":
+            margin_str = f"{edge:.2f} runs"
+            if edge >= 0:
+                margin_str = f"+{margin_str}"
+        else:
+            margin_str = f"{edge:.2f} pts"
+            if edge >= 0:
+                margin_str = f"+{margin_str}"
+
+        # Wager — C tier and display-only plays have kelly_$ == 0
+        wager_str = f"${kelly:,.2f}" if kelly > 0 else "-"
+
+        rows.append([
+            date_iso,                       # column A: date (e.g. "2026-04-17")
+            f"[{grade}]",
+            sport,
+            play.get("matchup", ""),
+            (play.get("game_time", "") or "").split(" @ ")[-1],
+            ptype,
+            play.get("side", ""),
+            line_str,
+            proj_str,
+            margin_str,
+            f"${play.get('ev', 0):+.2f}",
+            wager_str,
+        ])
+
+    sheet.append_rows(rows, value_input_option="RAW")
+    log.info("Google Sheets: %d play(s) written.", len(rows) - 1)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 def main() -> None:
@@ -386,9 +535,28 @@ def main() -> None:
     #   RUN_NBA=false python main.py          ← skip NBA for today
     #   RUN_NBA=false RUN_MLB=false python main.py  ← dry run / off-season
     #
-    RUN_NBA: bool = os.environ.get("RUN_NBA", "False").lower() == "true"
+    RUN_NBA: bool = os.environ.get("RUN_NBA", "True").lower() == "true"
     RUN_MLB: bool = os.environ.get("RUN_MLB", "True").lower() == "true"
 
+
+    # ── Phase 0: Grade previous bets ─────────────────────────────────────────
+    # Reads all sheet rows with a blank result column (col M), fetches final
+    # scores from The Odds API, and writes Hit / Miss before new bets are added.
+    print("\n── Phase 0 · Grading previous bets ─────────────────────────────")
+    _primary_key = os.environ.get("ODDS_API_KEY", getattr(nba_config, "ODDS_API_KEY", ""))
+    _extra_keys  = [os.environ.get(f"ODDS_API_KEY_{i}", "") for i in range(2, 10)]
+    api_key_pool = [k for k in [_primary_key] + _extra_keys if k and k != "YOUR_ODDS_API_KEY_HERE"]
+    gs_sheet_grader = _init_gsheets()
+    if gs_sheet_grader and api_key_pool:
+        try:
+            from grader import grade_sheet
+            n_graded = grade_sheet(gs_sheet_grader, api_key_pool)
+            print(f"  Graded {n_graded} previous bet(s).")
+        except Exception as exc:
+            log.warning(f"Result grading failed: {exc}")
+            print(f"  Result grading skipped: {exc}")
+    else:
+        print("  Result grading skipped (no sheet credentials or API keys).")
 
     # ── Phase 1: Supabase — initialised once, shared by both pipelines ────────
     # init_supabase() reads SUPABASE_URL / SUPABASE_KEY from .env.
@@ -439,6 +607,20 @@ def main() -> None:
         mlb_edge_tot  = getattr(mlb_config, "EDGE_TOTAL_MIN",  0.5),
         active_sports = active_sports,
     )
+
+    # ── Phase 5: Google Sheets ───────────────────────────────────────────────
+    gs_sheet = _init_gsheets()
+    if gs_sheet is not None and all_plays:
+        try:
+            _write_plays_to_sheets(gs_sheet, all_plays, dt.date.today())
+            print(f"  Google Sheets: {len(all_plays)} play(s) appended.")
+        except Exception as exc:
+            log.warning(f"Google Sheets write failed: {exc}")
+            print("  Google Sheets: write failed (see log).")
+    elif not all_plays:
+        print("  Google Sheets: no plays to write.")
+    else:
+        print("  Google Sheets: disabled (credentials not set in .env)")
 
     # ── Supabase status footer ────────────────────────────────────────────────
     # Show only the tables that were actually written to this run.
