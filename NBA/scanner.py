@@ -186,22 +186,28 @@ SLATE_KELLY_CAP: float          = 0.20
 # (C-tier gates are unchanged — they are display-only filters, not betting gates.)
 GRADE_THRESHOLDS: dict = {
     "spread": {
-        "A":      {"edge": 8.0,  "win_prob": 0.585},   # was 7.0 / 0.56
-        "B_PLUS": {"edge": 7.0,  "win_prob": 0.570},   # was 6.2 / 0.55
-        "B":      {"edge": 5.5,  "win_prob": 0.555},   # was 5.0 / 0.54
+        # A raised well above model noise floor (~10 pt MAE) — targets 0-2 bets/night
+        "A":      {"edge": 11.0, "win_prob": 0.630},   # was 8.0 / 0.585
+        # B+ absorbs what used to be borderline A (8-11 pt range)
+        "B_PLUS": {"edge": 8.5,  "win_prob": 0.600},   # was 7.0 / 0.570
+        "B":      {"edge": 5.5,  "win_prob": 0.555},   # unchanged
         "C":      {"edge": 3.0,  "win_prob": 0.515},   # unchanged
     },
     "total": {
-        # Totals are more projection-driven than spreads → kept one notch stricter.
-        "A":      {"edge": 9.5,  "win_prob": 0.585},   # was 8.0 / 0.56
-        "B_PLUS": {"edge": 8.5,  "win_prob": 0.570},   # was 7.0 / 0.55
-        "B":      {"edge": 7.0,  "win_prob": 0.555},   # was 6.0 / 0.54
+        # Totals are more projection-driven → A threshold set higher than spread
+        "A":      {"edge": 13.0, "win_prob": 0.630},   # was 9.5 / 0.585
+        # B+ absorbs what used to be borderline A (9.5-13 pt range)
+        "B_PLUS": {"edge": 10.5, "win_prob": 0.600},   # was 8.5 / 0.570
+        "B":      {"edge": 7.0,  "win_prob": 0.555},   # unchanged
         "C":      {"edge": 3.5,  "win_prob": 0.515},   # unchanged
     },
     "moneyline": {
-        "A":      {"edge": 0.08, "win_prob": 0.60},    # was 0.07 / 0.58
-        "B_PLUS": {"edge": 0.07, "win_prob": 0.580},   # was 0.06 / 0.565
-        "B":      {"edge": 0.055,"win_prob": 0.565},   # was 0.05 / 0.55
+        # ML A requires a very large probability edge — model at 54% can't
+        # reliably produce edges below 15%; anything smaller is likely noise
+        "A":      {"edge": 0.15, "win_prob": 0.650},   # was 0.08 / 0.60
+        # B+ absorbs the 10-15% ML edge range
+        "B_PLUS": {"edge": 0.10, "win_prob": 0.620},   # was 0.07 / 0.580
+        "B":      {"edge": 0.055,"win_prob": 0.565},   # unchanged
         "C":      {"edge": 0.03, "win_prob": 0.52},    # unchanged
     },
 }
@@ -211,11 +217,11 @@ GRADE_THRESHOLDS: dict = {
 # distances of the A threshold (on either edge OR win_prob).
 # This prevents ordinary B plays from being relabelled as B+.
 
-BPLUS_EDGE_CLOSE_SPREAD: float  = 1.0    # within 1.0 pt of A edge (spread)
-BPLUS_EDGE_CLOSE_TOTAL: float   = 1.0    # within 1.0 pt of A edge (total)
-BPLUS_EDGE_CLOSE_ML: float      = 0.01   # within 0.01 of A edge (ML)
-BPLUS_PROB_CLOSE: float         = 0.01   # within 0.01 of A win_prob (spread/total)
-BPLUS_ML_PROB_CLOSE: float      = 0.015  # within 0.015 of A win_prob (ML)
+BPLUS_EDGE_CLOSE_SPREAD: float  = 2.5    # within 2.5 pts of A edge (was 1.0 — gap is now 11-8.5=2.5)
+BPLUS_EDGE_CLOSE_TOTAL: float   = 2.5    # within 2.5 pts of A edge (was 1.0 — gap is now 13-10.5=2.5)
+BPLUS_EDGE_CLOSE_ML: float      = 0.05   # within 5% of A edge    (was 0.01 — gap is now 15-10=5%)
+BPLUS_PROB_CLOSE: float         = 0.03   # within 0.03 of A win_prob (was 0.01)
+BPLUS_ML_PROB_CLOSE: float      = 0.03   # within 0.03 of A win_prob (was 0.015)
 
 # ── Post-diagnostic guards ────────────────────────────────────────────────────
 # [Guard 1-ext] Large market spread cap: if the market already prices a team at
@@ -226,7 +232,7 @@ LARGE_MARKET_SPREAD_THR: float  = 13.0   # absolute market spread (pts)
 # [Guard 1-ext] UNDER-specific win_prob floor for A-tier totals.
 # NBA unders are fragile — pace spikes and garbage-time offense blow them up.
 # Require 63 % vs the standard 58.5 % OVER floor to reach A.
-GRADE_A_UNDER_WIN_PROB: float   = 0.63
+GRADE_A_UNDER_WIN_PROB: float   = 0.68   # was 0.63 — UNDER A requires 68% (very selective)
 
 # ── Convenience aliases (keep callers that reference old flat constants) ──────
 # A-tier
@@ -1041,6 +1047,7 @@ class ValueScanner:
                         "recommended_for_bet": False,
                         "kelly_$":          0.0,
                         # -- informational --
+                        "odds":             spread_juice,
                         "market_line":      market_spread,
                         "proj_line":        proj_spread,
                     })
@@ -1122,6 +1129,7 @@ class ValueScanner:
                         "recommended_for_bet": False,
                         "kelly_$":          0.0,
                         # -- informational --
+                        "odds":             total_juice,
                         "market_line":      market_total,
                         "proj_line":        proj_total,
                     })
@@ -1220,6 +1228,7 @@ class ValueScanner:
                                 "recommended_for_bet": False,
                                 "kelly_$":            0.0,
                                 # -- informational --
+                                "odds":               ml_odds,
                                 "market_prob_devigged": round(mkt_dvig, 4),
                                 "market_line":        ml_odds,
                                 "proj_line":          None,
@@ -1923,11 +1932,15 @@ def print_projection(
                 if play.get("confidence") is not None else ""
             )
 
+            odds_val = play.get("odds")
+            odds_str = f"  odds={odds_val:+d}" if odds_val is not None else ""
+
             print(
                 f"  {marker} {grade_str} {play['type']:<10} {play['side']:<5}"
                 f"  edge={edge_display}"
                 f"  prob={win_prob_pct:.1f}%"
                 f"  EV=${play.get('ev', 0):+.2f}"
+                f"{odds_str}"
                 f"  qscore={play.get('play_quality_score', 0):.1f}"
                 f"{mkt_dvig_str}"
                 f"{conf_str}"
