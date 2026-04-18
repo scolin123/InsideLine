@@ -301,7 +301,7 @@ def grade_sheet(sheet, api_key_pool: list[str]) -> int:
         matchup    = (row[3]  if len(row) > 3  else "").strip()
         market     = (row[5]  if len(row) > 5  else "").strip().upper()
         side       = (row[6]  if len(row) > 6  else "").strip().upper()
-        bet_result = (row[12] if len(row) > 12 else "").strip()
+        bet_result = (row[13] if len(row) > 13 else "").strip()
 
         # Skip divider / header rows
         first = date_str.upper()
@@ -441,9 +441,9 @@ def grade_sheet(sheet, api_key_pool: list[str]) -> int:
                 f"→ {result}"
             )
 
-            # Column M = column index 13 (1-based) in gspread A1 notation
+            # Column N = Bet Result (shifted right after Odds column was inserted)
             updates.append({
-                "range":  f"M{row_num}",
+                "range":  f"N{row_num}",
                 "values": [[result]],
             })
 
