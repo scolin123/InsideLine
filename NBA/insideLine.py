@@ -412,6 +412,9 @@ def run_pipeline(
     odds_api_key:   Optional[str]               = None,
     artifacts:      Optional[PipelineArtifacts] = None,
     retrain:        bool                        = True,
+    spread_juice:   int                         = -110,  # actual book juice for spread
+    over_juice:     int                         = -110,  # actual book juice for over
+    under_juice:    int                         = -110,  # actual book juice for under
 ) -> dict:
     """
     Per-game inference pipeline.
@@ -518,6 +521,9 @@ def run_pipeline(
         market_ml_home = market_ml_home,
         market_ml_away = market_ml_away,
         bankroll       = bankroll,
+        spread_juice   = spread_juice,
+        over_juice     = over_juice,
+        under_juice    = under_juice,
     )
 
     # ── Step 8 ── Print individual projection card ────────────────────────────
