@@ -178,6 +178,17 @@ def run_sport_pipeline(
         matchup  = f"{away_abv} @ {home_abv}"
 
         try:
+            # Forward per-side juice attrs that exist on this sport's GameOdds object.
+            # NBA uses spread_juice; MLB uses run_line_juice. Both share over/under_juice.
+            # Unknown attrs are skipped; run_pipeline defaults to -110 for anything missing.
+            _juice = {
+                k: v for k, v in {
+                    "run_line_juice": getattr(game_odds, "run_line_juice", None),
+                    "spread_juice":   getattr(game_odds, "spread_juice",   None),
+                    "over_juice":     getattr(game_odds, "over_juice",     None),
+                    "under_juice":    getattr(game_odds, "under_juice",    None),
+                }.items() if v is not None
+            }
             result = run_pipeline_fn(
                         home_team_abv  = home_abv,
                         away_team_abv  = away_abv,
@@ -188,6 +199,7 @@ def run_sport_pipeline(
                         bankroll       = bankroll,
                         live_odds      = False,
                         artifacts      = artifacts,
+                        **_juice,
                     )
 
             for play in result.get("plays", []):
@@ -448,27 +460,118 @@ def _init_gsheets():
         return None
 
 
+def _delete_todays_rows(sheet, run_date: dt.date) -> int:
+    """
+    Delete the divider row + all play rows written by the most recent run
+    for run_date, so a re-run doesn't produce duplicate entries.
+    Returns the number of rows deleted.
+    """
+    today_label = f"CURRENT - {run_date.strftime('%A, %B %d, %Y').upper()}"
+    all_rows    = sheet.get_all_values()
+
+    # Find the 1-based row number of today's divider
+    divider_1 = None
+    for i, row in enumerate(all_rows):
+        if row and row[0].strip().upper() == today_label:
+            divider_1 = i + 1   # gspread is 1-based
+            break
+
+    if divider_1 is None:
+        return 0   # no previous run today — nothing to delete
+
+    # Find where today's section ends (start of next top-level divider or end of sheet)
+    # "UPCOMING - " sub-headers are part of this run's block, so they are NOT stop markers.
+    _PREFIXES = ("CURRENT - ", "COMPLETED - ", "FUTURE - ")
+    end_1 = len(all_rows) + 1   # default: one past last row
+    for i in range(divider_1, len(all_rows)):   # 0-based index, rows after divider
+        cell = (all_rows[i][0] or "").strip().upper()
+        if any(cell.startswith(p) for p in _PREFIXES):
+            end_1 = i + 1   # 1-based row number of next divider
+            break
+
+    n = end_1 - divider_1
+    if n > 0:
+        sheet.delete_rows(divider_1, divider_1 + n - 1)
+    return n
+
+
+def _game_date_iso(game_time: str, fallback: dt.date) -> str:
+    """
+    Extract an ISO date string from a formatted game_time like
+    'April 17th @ 6:11 PM'.  Falls back to ``fallback`` if parsing fails.
+    Handles year rollover (e.g. December games run in January).
+    """
+    import re as _re
+    parts = (game_time or "").split(" @ ")
+    if len(parts) < 2:
+        return fallback.isoformat()
+    date_part = parts[0].strip()                         # e.g. "April 17th"
+    clean     = _re.sub(r"(\d+)(st|nd|rd|th)", r"\1", date_part)  # "April 17"
+    for year in (fallback.year, fallback.year + 1):
+        try:
+            return dt.datetime.strptime(f"{clean} {year}", "%B %d %Y").date().isoformat()
+        except ValueError:
+            continue
+    return fallback.isoformat()
+
+
 def _write_plays_to_sheets(sheet, plays: list[dict], run_date: dt.date) -> None:
     """
     Append a date-divider row followed by one row per play to the Google Sheet.
-    Columns (12 total, matching existing sheet layout):
+    Columns (14 total):
       Date | Grade | League | Matchup | Date/Time | Market | Side |
-      Line | Proj. Result | Margin | EV | Wager
+      Line | Odds | Proj. Result | Margin | EV | Wager  (Bet Result written by grader)
+
+    Column A uses the actual game date (parsed from game_time), NOT the run date,
+    so future-dated plays land on the correct date in the sheet.
 
     NOTE: value_input_option="RAW" is intentional — prevents Google Sheets from
     interpreting margin strings like "+0.10 runs" as formulas (#ERROR!) or
     converting "+8.60%" to the decimal 0.086.
     """
-    date_iso   = run_date.isoformat()                               # e.g. "2026-04-17"
-    date_label = f"CURRENT - {run_date.strftime('%A, %B %d, %Y').upper()}"
-    rows = [[date_label] + [""] * 11]                               # 12 columns total
+    # Remove any rows from a previous run today before appending fresh ones
+    n_deleted = _delete_todays_rows(sheet, run_date)
+    if n_deleted:
+        log.info(f"Google Sheets: cleared {n_deleted} stale row(s) from previous run.")
 
-    for play in plays:
+    import itertools as _itertools
+    import re as _re
+
+    # Grade rank for sorting within each date group (best → worst)
+    _GRADE_RANK = {"A": 0, "A-dog": 1, "B+": 2, "B": 3, "C": 4}
+
+    def _play_sort_key(p: dict) -> tuple:
+        game_date = _game_date_iso(p.get("game_time", "") or "", run_date)
+        grade_rank = _GRADE_RANK.get(p.get("grade", ""), 99)
+        return (game_date, grade_rank)
+
+    sorted_plays = sorted(plays, key=_play_sort_key)
+
+    # ── Build the main "CURRENT" header (run date) ────────────────────────────
+    run_date_iso = run_date.isoformat()
+    run_label    = f"CURRENT - {run_date.strftime('%A, %B %d, %Y').upper()}"
+    rows: list[list] = [[run_label] + [""] * 13]
+
+    def _date_label(date_iso: str, prefix: str) -> str:
+        """Format a date ISO string into a sheet header label."""
+        try:
+            d        = dt.date.fromisoformat(date_iso)
+            raw      = d.strftime("%A, %B %d, %Y").upper()   # "SATURDAY, APRIL 18, 2026"
+            day_str  = _re.sub(r"(\w+ )0(\d,)", r"\1\2", raw)  # strip leading zero
+        except ValueError:
+            day_str = date_iso.upper()
+        return f"{prefix} - {day_str}"
+
+    def _build_play_row(play: dict) -> list:
         sport  = play.get("sport", "")
         ptype  = play.get("type", "")
         edge   = play.get("edge", 0.0)
         kelly  = play.get("kelly_$", 0.0)
         grade  = play.get("grade", "")
+
+        game_time_full = play.get("game_time", "") or ""
+        date_iso       = _game_date_iso(game_time_full, fallback=run_date)
+        time_str       = game_time_full.split(" @ ")[-1] if " @ " in game_time_full else game_time_full
 
         # Line / Proj. Result
         if ptype == "MONEYLINE":
@@ -485,7 +588,7 @@ def _write_plays_to_sheets(sheet, plays: list[dict], run_date: dt.date) -> None:
             line_str = f"{line_val:.1f}" if line_val is not None else "-"
             proj_str = f"{proj_val:.1f}" if proj_val is not None else "-"
 
-        # Margin — strip leading + so Sheets doesn't try to evaluate as formula
+        # Margin
         if ptype == "MONEYLINE":
             margin_str = f"{edge * 100:.2f}%"
             if edge >= 0:
@@ -499,23 +602,38 @@ def _write_plays_to_sheets(sheet, plays: list[dict], run_date: dt.date) -> None:
             if edge >= 0:
                 margin_str = f"+{margin_str}"
 
-        # Wager — C tier and display-only plays have kelly_$ == 0
         wager_str = f"${kelly:,.2f}" if kelly > 0 else "-"
 
-        rows.append([
-            date_iso,                       # column A: date (e.g. "2026-04-17")
-            f"[{grade}]",
-            sport,
-            play.get("matchup", ""),
-            (play.get("game_time", "") or "").split(" @ ")[-1],
-            ptype,
-            play.get("side", ""),
-            line_str,
-            proj_str,
-            margin_str,
-            f"${play.get('ev', 0):+.2f}",
-            wager_str,
-        ])
+        odds_val = play.get("odds")
+        odds_str = f"{odds_val:+d}" if odds_val is not None else "-"
+
+        return [
+            date_iso,                       # A: game date
+            f"[{grade}]",                   # B: grade
+            sport,                          # C: league
+            play.get("matchup", ""),        # D: matchup
+            time_str,                       # E: tipoff time
+            ptype,                          # F: market
+            play.get("side", ""),           # G: side
+            line_str,                       # H: book line
+            odds_str,                       # I: american odds
+            proj_str,                       # J: proj. result
+            margin_str,                     # K: margin
+            f"${play.get('ev', 0):+.2f}",  # L: EV
+            wager_str,                      # M: wager
+        ]
+
+    # ── Group sorted plays by game date, inserting sub-headers ────────────────
+    for date_iso, group in _itertools.groupby(
+        sorted_plays,
+        key=lambda p: _game_date_iso(p.get("game_time", "") or "", run_date),
+    ):
+        if date_iso > run_date_iso:
+            # Future date — insert an UPCOMING sub-header
+            rows.append([_date_label(date_iso, "UPCOMING")] + [""] * 13)
+
+        for play in group:
+            rows.append(_build_play_row(play))
 
     sheet.append_rows(rows, value_input_option="RAW")
     log.info("Google Sheets: %d play(s) written.", len(rows) - 1)
