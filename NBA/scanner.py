@@ -813,7 +813,8 @@ class ValueScanner:
         market_ml_away:  Optional[int]   = None,   # American ML, away side (required for ML bets)
         bankroll:        float           = 1000.0,
         spread_juice:    int             = -110,
-        total_juice:     int             = -110,
+        over_juice:      int             = -110,
+        under_juice:     int             = -110,
     ) -> dict:
         """
         Compute fair lines and return a full projection dict with tiered plays.
@@ -1098,7 +1099,8 @@ class ValueScanner:
                     is_over=(side == "OVER"),
                 )
 
-                ev    = self._raw_ev(adj_total_prob, total_juice)
+                side_juice = over_juice if side == "OVER" else under_juice
+                ev    = self._raw_ev(adj_total_prob, side_juice)
                 grade = self.grade_play(
                     "TOTAL", adj_total_edge, ev, adj_total_prob,
                     bet_side=side,
@@ -1129,7 +1131,7 @@ class ValueScanner:
                         "recommended_for_bet": False,
                         "kelly_$":          0.0,
                         # -- informational --
-                        "odds":             total_juice,
+                        "odds":             over_juice if side == "OVER" else under_juice,
                         "market_line":      market_total,
                         "proj_line":        proj_total,
                     })
@@ -1247,7 +1249,7 @@ class ValueScanner:
         #  Mark selected plays as is_bettable=True and assign Kelly sizing.
         # ══════════════════════════════════════════════════════════════════════
         result["plays"] = self._select_bettable_plays(
-            result["plays"], bankroll, spread_juice, total_juice
+            result["plays"], bankroll, spread_juice
         )
 
         # Apply display limits and assign display_rank / game_rank
@@ -1261,7 +1263,6 @@ class ValueScanner:
         plays: List[dict],
         bankroll: float,
         spread_juice: int,
-        total_juice: int,
     ) -> List[dict]:
         """
         Layer 2: choose which plays to mark is_bettable=True.
@@ -1433,7 +1434,8 @@ class ValueScanner:
         # ── Assign Kelly to bettable plays (confidence-scaled) ─────────────────
         # [Guard 16] _kelly now accepts a confidence argument and scales the
         # final bet size down proportionally — see _kelly() for the formula.
-        juice_map = {"SPREAD": spread_juice, "TOTAL": total_juice, "MONEYLINE": None}
+        # TOTAL juice is per-side (over vs under) and already stored on each play dict as "odds"
+        juice_map = {"SPREAD": spread_juice, "MONEYLINE": None}
         for play in plays:
             if not play["is_bettable"]:
                 play["kelly_$"] = 0.0
@@ -1443,6 +1445,8 @@ class ValueScanner:
             conf     = play.get("confidence", 1.0)
             if play["market_type"] == "MONEYLINE":
                 market_ml = play["market_line"]
+            elif play["market_type"] == "TOTAL":
+                market_ml = play.get("odds", -110)   # per-side juice stored on play dict
             else:
                 market_ml = juice_map[play["market_type"]]
             play["kelly_$"] = self._kelly(
