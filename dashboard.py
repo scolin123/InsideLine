@@ -257,14 +257,15 @@ def load_sheet_data() -> pd.DataFrame:
         first = (row[0] or "").strip().upper()
         if first.startswith("CURRENT") or first.startswith("COMPLETED") or first.startswith("FUTURE"):
             continue
-        plays.append((row + [""] * 13)[:13])
+        plays.append((row + [""] * 14)[:14])
 
     if not plays:
         return pd.DataFrame()
 
     df = pd.DataFrame(plays, columns=[
         "date", "grade", "league", "matchup", "time",
-        "market", "side", "line", "proj", "margin", "ev", "wager", "result",
+        "market", "side", "line", "odds_book", "proj",
+        "margin", "ev", "wager", "result",
     ])
 
     for col in ("league", "market"):
@@ -586,30 +587,6 @@ def _render_history_tab(df: pd.DataFrame, league: str) -> None:
         st.info("No settled bets on record. Enter results in the 'Bet Result' column of the Google Sheet.")
         return
 
-    # ── Summary metrics ────────────────────────────────────────────────────────
-    total_s  = len(sub)
-    hits_s   = int(sub["hit"].sum())
-    misses_s = total_s - hits_s
-    overall  = hits_s / total_s * 100 if total_s else 0.0
-
-    def _tier_rate(grades: list[str]) -> str:
-        t = sub[sub["grade"].isin(grades)]
-        if len(t) == 0:
-            return "—"
-        return f"{t['hit'].sum() / len(t) * 100:.1f}%"
-
-    with st.container():
-        _metric_row([
-            ("Overall Hit Rate", f"{overall:.1f}%"),
-            ("A-Tier Hit Rate",  _tier_rate(["[A]", "[A-dog]"])),
-            ("B-Tier Hit Rate",  _tier_rate(["[B+]", "[B]"])),
-            ("C-Tier Hit Rate",  _tier_rate(["[C]"])),
-            ("Total Plays",      str(total_s)),
-            ("Hits / Misses",    f"{hits_s} / {misses_s}"),
-        ])
-
-    st.divider()
-
     # ── Time filter ────────────────────────────────────────────────────────────
     today_dt = pd.Timestamp(dt.date.today())
     tf = st.radio(
@@ -626,6 +603,30 @@ def _render_history_tab(df: pd.DataFrame, league: str) -> None:
     }[tf]
 
     view = sub[sub["date_parsed"] >= cutoff].copy()
+
+    # ── Summary metrics (filtered to selected range) ───────────────────────────
+    total_s  = len(view)
+    hits_s   = int(view["hit"].sum()) if total_s else 0
+    misses_s = total_s - hits_s
+    overall  = hits_s / total_s * 100 if total_s else 0.0
+
+    def _tier_rate(grades: list[str]) -> str:
+        t = view[view["grade"].isin(grades)]
+        if len(t) == 0:
+            return "—"
+        return f"{t['hit'].sum() / len(t) * 100:.1f}%"
+
+    with st.container():
+        _metric_row([
+            ("Overall Hit Rate", f"{overall:.1f}%"),
+            ("A-Tier Hit Rate",  _tier_rate(["[A]", "[A-dog]"])),
+            ("B-Tier Hit Rate",  _tier_rate(["[B+]", "[B]"])),
+            ("C-Tier Hit Rate",  _tier_rate(["[C]"])),
+            ("Total Plays",      str(total_s)),
+            ("Hits / Misses",    f"{hits_s} / {misses_s}"),
+        ])
+
+    st.divider()
 
     # ── Chart 1: Rolling accuracy ──────────────────────────────────────────────
     with st.container():
